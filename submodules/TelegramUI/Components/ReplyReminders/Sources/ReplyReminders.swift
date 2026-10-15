@@ -13,6 +13,8 @@ public struct ReplyReminder: Codable, Equatable {
     public let note: String?
     public let time: Int32
     public var localMessageId: Int32?
+    // Set once the reminder has fired and its line was moved to the bottom of the chat.
+    public var firedLocalMessageId: Int32?
 
     public var id: String {
         return "\(self.accountPeerId)_\(self.peerId)"
@@ -68,10 +70,14 @@ public final class ReplyReminderStore {
     }
 
     fileprivate func updateLocalMessageId(id: String, localMessageId: Int32) {
+        self.modify(id: id) { $0.localMessageId = localMessageId }
+    }
+
+    fileprivate func modify(id: String, _ f: (inout ReplyReminder) -> Void) {
         self.update(self.items.map { item in
             var item = item
             if item.id == id {
-                item.localMessageId = localMessageId
+                f(&item)
             }
             return item
         })
@@ -108,7 +114,9 @@ public struct ReplyReminderStrings {
     public var menuTitle: String { return self.isRussian ? "Напомнить" : "Remind Me" }
     public var pickerTitle: String { return self.isRussian ? "Напоминание" : "Set Reminder" }
     public var menuChangeTitle: String { return self.isRussian ? "Изменить напоминание" : "Change Reminder" }
-    public var cancel: String { return self.isRussian ? "Отменить напоминание" : "Cancel Reminder" }
+    public var delete: String { return self.isRussian ? "Удалить" : "Delete" }
+    public var deleteReminder: String { return self.isRussian ? "Удалить напоминание" : "Delete Reminder" }
+    public var update: String { return self.isRussian ? "Изменить" : "Change" }
     public var undo: String { return self.isRussian ? "Отменить" : "Undo" }
     public var cancelled: String { return self.isRussian ? "Напоминание отменено" : "Reminder cancelled" }
     public var notePlaceholder: String { return self.isRussian ? "Заметка, например «созвон в 15:00»" : "Note, e.g. “call at 3 PM”" }
@@ -135,6 +143,17 @@ public struct ReplyReminderStrings {
             return "\(base)\n«\(note)»"
         }
         return base
+    }
+
+    // Gray line added at the bottom of the chat when the reminder fires; the first `boldLength` characters are bold.
+    public func firedText(note: String?, time: Int32) -> (text: String, boldLength: Int) {
+        // Service lines have no timestamp of their own, so the time goes into the text.
+        let title = self.isRussian ? "Напоминание в \(self.timeString(time))" : "Reminder at \(self.timeString(time))"
+        if let note {
+            let text = "\(title): \(note)"
+            return (text, (title as NSString).length + 1)
+        }
+        return (title, (title as NSString).length)
     }
 
     public var notificationBody: String {
@@ -176,8 +195,9 @@ public struct ReplyReminderStrings {
 
     public func timeString(_ timestamp: Int32) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: self.isRussian ? "ru_RU" : "en_US")
-        formatter.setLocalizedDateFormatFromTemplate(self.isRussian ? "H:mm" : "j:mm")
+        // Follow the device's 12/24-hour setting, like the rest of Telegram.
+        formatter.locale = Locale.current
+        formatter.setLocalizedDateFormatFromTemplate("j:mm")
         return formatter.string(from: Date(timeIntervalSince1970: Double(timestamp)))
     }
 }
@@ -233,6 +253,36 @@ public func setReplyReminder(context: AccountContext, peerId: EnginePeer.Id, pee
     UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
 
     return reminder
+}
+
+// When a reminder is due, replace its "reminder set" line with a "Reminder: note" line placed at the
+// moment it fired, so the note sits right where you land in the chat instead of far up the history.
+// Called when the chat opens (the app may not have been running when the notification fired).
+public func materializeDueReplyReminder(context: AccountContext, peerId: EnginePeer.Id, strings: ReplyReminderStrings) {
+    guard let reminder = ReplyReminderStore.shared.reminder(peerId: peerId, accountPeerId: context.account.peerId), reminder.isDue, reminder.firedLocalMessageId == nil else {
+        return
+    }
+    let reminderId = reminder.id
+    ReplyReminderStore.shared.modify(id: reminderId) { $0.firedLocalMessageId = 0 }
+
+    let (text, boldLength) = strings.firedText(note: reminder.note, time: reminder.time)
+    let account = context.account
+    let previousLocalMessageId = reminder.localMessageId
+    let _ = (account.postbox.transaction { transaction -> MessageId? in
+        if let previousLocalMessageId {
+            transaction.deleteMessages([MessageId(peerId: peerId, namespace: Namespaces.Message.Local, id: previousLocalMessageId)], forEachMedia: nil)
+        }
+        var randomId: Int64 = 0
+        arc4random_buf(&randomId, 8)
+        let entities = [MessageTextEntity(range: 0 ..< boldLength, type: .Bold)]
+        let message = StoreMessage(peerId: peerId, namespace: Namespaces.Message.Local, customStableId: nil, globallyUniqueId: randomId, groupingKey: nil, threadId: nil, timestamp: reminder.time, flags: [], tags: [], globalTags: [], localTags: [], forwardInfo: nil, authorId: account.peerId, text: "", attributes: [], media: [TelegramMediaAction(action: .customText(text: text, entities: entities, additionalAttributes: nil))])
+        return transaction.addMessages([message], location: .Random)[randomId]
+    }
+    |> deliverOnMainQueue).startStandalone(next: { messageId in
+        if let messageId {
+            ReplyReminderStore.shared.modify(id: reminderId) { $0.firedLocalMessageId = messageId.id }
+        }
+    })
 }
 
 public func cancelReplyReminder(context: AccountContext, reminder: ReplyReminder) {

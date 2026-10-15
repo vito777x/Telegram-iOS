@@ -76,6 +76,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
         private let title = ComponentView<Empty>()
         private let button = ComponentView<Empty>()
         private let secondaryButton = ComponentView<Empty>()
+        private let deleteButton = ComponentView<Empty>()
         
         private var datePicker: DatePickerNode?
         
@@ -269,7 +270,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 title = strings.Conversation_ScheduleMessage_Title
             case .reminders:
                 title = strings.Conversation_SetReminder_Title
-            case let .replyReminder(replyReminderTitle, _, _):
+            case let .replyReminder(replyReminderTitle, _, _, _, _):
                 title = replyReminderTitle
             case .format:
                 title = strings.Conversation_FormatDate_Title
@@ -295,7 +296,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             }
             contentHeight += 62.0
             
-            if case let .replyReminder(_, notePlaceholder, note) = component.mode {
+            if case let .replyReminder(_, notePlaceholder, note, _, _) = component.mode {
                 let noteField: UITextField
                 if let current = self.noteField {
                     noteField = current
@@ -592,6 +593,15 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             }
                 
             let buttonInsets = ContainerViewLayout.concentricInsets(bottomInset: environment.safeInsets.bottom, innerDiameter: 52.0, sideInset: 30.0)
+            var buttonTitleValue = buttonTitle
+            var deleteButtonTitle: String?
+            if case let .replyReminder(_, _, _, deleteTitle?, updateTitle) = component.mode {
+                // Editing an existing reminder: Update on top, Delete below it, like other Telegram sheets.
+                deleteButtonTitle = deleteTitle
+                if let updateTitle {
+                    buttonTitleValue = updateTitle
+                }
+            }
             let buttonSize = self.button.update(
                 transition: transition,
                 component: AnyComponent(ButtonComponent(
@@ -602,7 +612,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                         pressedColor: environment.theme.list.itemCheckColors.fillColor.withMultipliedAlpha(0.8),
                     ),
                     content: AnyComponentWithIdentity(id: AnyHashable(0 as Int), component: AnyComponent(
-                        Text(text: buttonTitle, font: Font.semibold(17.0), color: environment.theme.list.itemCheckColors.foregroundColor)
+                        Text(text: buttonTitleValue, font: Font.semibold(17.0), color: environment.theme.list.itemCheckColors.foregroundColor)
                     )),
                     isEnabled: true,
                     displaysProgress: false,
@@ -636,6 +646,45 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 transition.setFrame(view: buttonView, frame: buttonFrame)
             }
             contentHeight += buttonSize.height
+            
+            if let deleteButtonTitle {
+                contentHeight += 10.0
+                let destructiveColor = environment.theme.list.itemDestructiveColor
+                let deleteSize = self.deleteButton.update(
+                    transition: transition,
+                    component: AnyComponent(ButtonComponent(
+                        background: ButtonComponent.Background(
+                            style: .glass,
+                            color: destructiveColor.withMultipliedAlpha(0.12),
+                            foreground: destructiveColor,
+                            pressedColor: destructiveColor.withMultipliedAlpha(0.2),
+                        ),
+                        content: AnyComponentWithIdentity(id: AnyHashable(0 as Int), component: AnyComponent(
+                            Text(text: deleteButtonTitle, font: Font.semibold(17.0), color: destructiveColor)
+                        )),
+                        isEnabled: true,
+                        displaysProgress: false,
+                        action: { [weak self] in
+                            guard let self, let component = self.component, let controller = self.environment?.controller() as? ChatScheduleTimeScreen else {
+                                return
+                            }
+                            controller.completion(ChatScheduleTimeScreen.Result(time: 0, repeatPeriod: nil, isDelete: true))
+                            component.dismiss()
+                        }
+                    )),
+                    environment: {},
+                    containerSize: CGSize(width: availableSize.width - buttonInsets.left - buttonInsets.right, height: 52.0)
+                )
+                if let deleteView = self.deleteButton.view {
+                    if deleteView.superview == nil {
+                        self.addSubview(deleteView)
+                    }
+                    transition.setFrame(view: deleteView, frame: CGRect(origin: CGPoint(x: buttonInsets.left, y: contentHeight), size: deleteSize))
+                }
+                contentHeight += deleteSize.height
+            } else if let deleteView = self.deleteButton.view, deleteView.superview != nil {
+                deleteView.removeFromSuperview()
+            }
             
             var isFormatOrSearch = false
             if case .format = component.mode {
@@ -1150,7 +1199,7 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
     public enum Mode: Equatable {
         case scheduledMessages(peerId: EnginePeer.Id, sendWhenOnlineAvailable: Bool)
         case reminders
-        case replyReminder(title: String, notePlaceholder: String, note: String?)
+        case replyReminder(title: String, notePlaceholder: String, note: String?, deleteTitle: String?, updateTitle: String?)
         case format
         case poll
         case search
@@ -1161,12 +1210,14 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
         public let repeatPeriod: Int32?
         public let silentPosting: Bool
         public let note: String?
+        public let isDelete: Bool
         
-        public init(time: Int32, repeatPeriod: Int32?, silentPosting: Bool = false, note: String? = nil) {
+        public init(time: Int32, repeatPeriod: Int32?, silentPosting: Bool = false, note: String? = nil, isDelete: Bool = false) {
             self.time = time
             self.repeatPeriod = repeatPeriod
             self.silentPosting = silentPosting
             self.note = note
+            self.isDelete = isDelete
         }
     }
     

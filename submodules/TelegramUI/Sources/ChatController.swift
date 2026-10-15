@@ -1020,6 +1020,14 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                     }))
                     
                     return true
+                } else if let action = media as? TelegramMediaAction, case .customText = action.action, replyReminderForLocalMessage(context: self.context, messageId: message.id) != nil, let peer = message.peers[message.id.peerId] {
+                    // Tapping the "reminder set" line opens the reminder for editing.
+                    presentReplyReminderEditor(context: self.context, peerId: message.id.peerId, peer: EnginePeer(peer), push: { [weak self] controller in
+                        self?.push(controller)
+                    }, present: { [weak self] controller in
+                        self?.present(controller, in: .current)
+                    })
+                    return true
                 } else if let action = media as? TelegramMediaAction {
                     if !displayVoiceMessageDiscardAlert() {
                         return false
@@ -7676,6 +7684,11 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        
+        if case let .peer(peerId) = self.chatLocation {
+            let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
+            materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
+        }
                 
         if self.willAppear {
             self.chatDisplayNode.historyNode.refreshPollActionsForVisibleMessages()

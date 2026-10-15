@@ -11,6 +11,9 @@ swift_library(
         "//submodules/Postbox:Postbox",
         "//submodules/TelegramCore:TelegramCore",
         "//submodules/AccountContext:AccountContext",
+        "//submodules/Display:Display",
+        "//submodules/UndoUI:UndoUI",
+        "//submodules/TelegramUI/Components/ChatScheduleTimeController",
     ],
     visibility = [
         "//visibility:public",
