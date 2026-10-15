@@ -107,9 +107,14 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
         private var maxDate: Date?
         
         private var isPickingTime = false
+        // Day the user chose in the calendar; the time wheel never moves the reminder off it for good.
+        private var calendarSelectedDate: Date?
         private var isPickingRepeatPeriod = false
                 
         private var repeatPeriod: Int32?
+        
+        private var noteField: UITextField?
+        private let noteFieldDelegate = ReplyReminderNoteFieldDelegate()
         
         private let dateFormatter: DateFormatter
         
@@ -264,6 +269,8 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 title = strings.Conversation_ScheduleMessage_Title
             case .reminders:
                 title = strings.Conversation_SetReminder_Title
+            case let .replyReminder(replyReminderTitle, _, _):
+                title = replyReminderTitle
             case .format:
                 title = strings.Conversation_FormatDate_Title
             case .poll:
@@ -288,6 +295,31 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             }
             contentHeight += 62.0
             
+            if case let .replyReminder(_, notePlaceholder, note) = component.mode {
+                let noteField: UITextField
+                if let current = self.noteField {
+                    noteField = current
+                } else {
+                    noteField = UITextField()
+                    noteField.font = Font.regular(17.0)
+                    noteField.returnKeyType = .done
+                    noteField.clearButtonMode = .whileEditing
+                    noteField.layer.cornerRadius = 12.0
+                    noteField.leftView = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 14.0, height: 1.0))
+                    noteField.leftViewMode = .always
+                    noteField.delegate = self.noteFieldDelegate
+                    noteField.text = note
+                    self.noteField = noteField
+                    self.addSubview(noteField)
+                }
+                noteField.textColor = environment.theme.actionSheet.inputTextColor
+                noteField.tintColor = environment.theme.actionSheet.controlAccentColor
+                noteField.backgroundColor = environment.theme.actionSheet.inputBackgroundColor
+                noteField.attributedPlaceholder = NSAttributedString(string: notePlaceholder, font: Font.regular(17.0), textColor: environment.theme.actionSheet.inputPlaceholderColor)
+                transition.setFrame(view: noteField, frame: CGRect(origin: CGPoint(x: 24.0, y: contentHeight - 8.0), size: CGSize(width: availableSize.width - 48.0, height: 44.0)))
+                contentHeight += 48.0
+            }
+            
             var added = false
             let datePicker: DatePickerNode
             if let current = self.datePicker {
@@ -307,6 +339,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 datePicker.valueUpdated = { [weak self] date in
                     if let self {
                         self.date = date
+                        self.calendarSelectedDate = date
                         self.state?.updated()
                     }
                 }
@@ -411,6 +444,9 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                                     self.isPickingRepeatPeriod = false
                                 } else {
                                     self.isPickingTime = !self.isPickingTime
+                                    if self.isPickingTime, self.calendarSelectedDate == nil {
+                                        self.calendarSelectedDate = self.date
+                                    }
                                 }
                                 self.state?.updated()
                             },
@@ -439,6 +475,8 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             } else if case .search = component.mode {
                 contentHeight += 8.0
             } else if case .poll = component.mode {
+                contentHeight += 8.0
+            } else if case .replyReminder = component.mode {
                 contentHeight += 8.0
             } else {
                 transition.setFrame(layer: self.bottomSeparator, frame: CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: CGSize(width: availableSize.width - sideInset * 2.0, height: UIScreenPixel)))
@@ -537,7 +575,7 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 } else {
                     buttonTitle = strings.Conversation_ScheduleMessage_SendOn(self.dateFormatter.string(from: date), time).string
                 }
-            case .reminders:
+            case .reminders, .replyReminder:
                 if calendar.isDateInToday(date) {
                     buttonTitle = strings.Conversation_SetReminder_RemindToday(time).string
                 } else if calendar.isDateInTomorrow(date) {
@@ -572,11 +610,16 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                         guard let self, let component = self.component, let controller = self.environment?.controller() as? ChatScheduleTimeScreen else {
                             return
                         }
+                        var note: String?
+                        if let text = self.noteField?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                            note = text
+                        }
                         controller.completion(
                             ChatScheduleTimeScreen.Result(
                                 time: Int32(self.date?.timeIntervalSince1970 ?? 0),
                                 repeatPeriod: self.repeatPeriod,
-                                silentPosting: self.isSilentPosting
+                                silentPosting: self.isSilentPosting,
+                                note: note
                             )
                         )
                         component.dismiss()
@@ -703,7 +746,20 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                                         return
                                     }
                                     var date = value
-                                    if let minDate = self.minDate, date < minDate {
+                                    if case .replyReminder = self.component?.mode, let minDate = self.minDate, let anchor = self.calendarSelectedDate {
+                                        // Keep the calendar day; only move to the next day while that time has already passed.
+                                        let localCalendar = Calendar.current
+                                        var components = localCalendar.dateComponents([.year, .month, .day], from: anchor)
+                                        let timeComponents = localCalendar.dateComponents([.hour, .minute], from: value)
+                                        components.hour = timeComponents.hour
+                                        components.minute = timeComponents.minute
+                                        if let anchored = localCalendar.date(from: components) {
+                                            date = anchored
+                                            if anchored < minDate, let nextDay = localCalendar.date(byAdding: .day, value: 1, to: anchored) {
+                                                date = nextDay
+                                            }
+                                        }
+                                    } else if let minDate = self.minDate, date < minDate {
                                         let timeZone = TimeZone(secondsFromGMT: 0)!
                                         var calendar = Calendar(identifier: .gregorian)
                                         calendar.timeZone = timeZone
@@ -1094,6 +1150,7 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
     public enum Mode: Equatable {
         case scheduledMessages(peerId: EnginePeer.Id, sendWhenOnlineAvailable: Bool)
         case reminders
+        case replyReminder(title: String, notePlaceholder: String, note: String?)
         case format
         case poll
         case search
@@ -1103,11 +1160,13 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
         public let time: Int32
         public let repeatPeriod: Int32?
         public let silentPosting: Bool
+        public let note: String?
         
-        public init(time: Int32, repeatPeriod: Int32?, silentPosting: Bool = false) {
+        public init(time: Int32, repeatPeriod: Int32?, silentPosting: Bool = false, note: String? = nil) {
             self.time = time
             self.repeatPeriod = repeatPeriod
             self.silentPosting = silentPosting
+            self.note = note
         }
     }
     
@@ -1824,5 +1883,17 @@ private final class TimeMenuComponent: Component {
 
     public func update( view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<Empty>, transition: ComponentTransition) -> CGSize {
         return view.update(component: self, availableSize: availableSize, state: state, environment: environment, transition: transition)
+    }
+}
+
+private final class ReplyReminderNoteFieldDelegate: NSObject, UITextFieldDelegate {
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder()
+        return true
+    }
+    
+    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+        let current = (textField.text ?? "") as NSString
+        return current.replacingCharacters(in: range, with: string).count <= 120
     }
 }

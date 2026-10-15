@@ -15,6 +15,8 @@ import TelegramPresentationData
 import TelegramStringFormatting
 import ChatTimerScreen
 import NotificationPeerExceptionController
+import ChatScheduleTimeController
+import ReplyReminders
 
 func archiveContextMenuItems(context: AccountContext, group: EngineChatList.Group, chatListController: ChatListControllerImpl?) -> Signal<[ContextMenuItem], NoError> {
     let presentationData = context.sharedContext.currentPresentationData.with({ $0 })
@@ -469,6 +471,10 @@ func chatContextMenuItems(context: AccountContext, peerId: EnginePeer.Id, promoI
                                         f(.default)
                                     })
                                 })))
+                            }
+                            
+                            if !isSavedMessages {
+                                items.append(contentsOf: replyReminderContextMenuItems(context: context, peerId: peerId, peer: peer, chatListController: chatListController))
                             }
                         } else {
                             if case .search = source {
@@ -1059,4 +1065,70 @@ private func openCustomMute(context: AccountContext, peerId: EnginePeer.Id, thre
     })
     baseController.view.endEditing(true)
     baseController.present(controller, in: .window(.root))
+}
+
+// "Remind Me": opens the date and time picker right away; a set reminder can be changed or cancelled.
+private func replyReminderContextMenuItems(context: AccountContext, peerId: EnginePeer.Id, peer: EnginePeer, chatListController: ChatListControllerImpl?) -> [ContextMenuItem] {
+    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+    let strings = ReplyReminderStrings(languageCode: presentationData.strings.baseLanguageCode)
+    let existingReminder = ReplyReminderStore.shared.reminder(peerId: peerId, accountPeerId: context.account.peerId)
+
+    var items: [ContextMenuItem] = []
+    let textLayout: ContextMenuActionItemTextLayout
+    if let existingReminder, !existingReminder.isDue {
+        textLayout = .secondLineWithValue(strings.relativeWhen(existingReminder.time))
+    } else {
+        textLayout = .singleLine
+    }
+    items.append(.action(ContextMenuActionItem(text: existingReminder != nil ? strings.menuChangeTitle : strings.menuTitle, textLayout: textLayout, icon: { theme in
+        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Schedule"), color: theme.contextMenu.primaryColor)
+    }, action: { [weak chatListController] c, _ in
+        c?.dismiss(completion: {
+            var currentTime: Int32?
+            if let existingReminder, !existingReminder.isDue {
+                currentTime = existingReminder.time
+            }
+            let controller = ChatScheduleTimeScreen(
+                context: context,
+                mode: .replyReminder(title: strings.pickerTitle, notePlaceholder: strings.notePlaceholder, note: existingReminder?.note),
+                currentTime: currentTime,
+                isDark: false,
+                completion: { [weak chatListController] result in
+                    let reminder = setReplyReminder(context: context, peerId: peerId, peer: peer, time: result.time, note: result.note, strings: strings)
+                    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+                    let content: UndoOverlayContent = .universal(
+                        animation: "anim_clock",
+                        scale: 0.058,
+                        colors: [:],
+                        title: strings.toastTitle(strings.relativeWhen(result.time)),
+                        text: strings.toastText(reminder.peerTitle, note: reminder.note),
+                        customUndoText: strings.undo,
+                        timeout: 5.0
+                    )
+                    chatListController?.present(UndoOverlayController(presentationData: presentationData, content: content, elevatedLayout: false, animateInAsReplacement: false, action: { action in
+                        if case .undo = action {
+                            cancelReplyReminder(context: context, reminder: reminder)
+                        }
+                        return false
+                    }), in: .current)
+                }
+            )
+            chatListController?.push(controller)
+        })
+    })))
+
+    if let existingReminder {
+        items.append(.action(ContextMenuActionItem(text: strings.cancel, textColor: .destructive, icon: { theme in
+            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Delete"), color: theme.contextMenu.destructiveColor)
+        }, action: { [weak chatListController] c, _ in
+            c?.dismiss(completion: {
+                cancelReplyReminder(context: context, reminder: existingReminder)
+                let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+                chatListController?.present(UndoOverlayController(presentationData: presentationData, content: .universal(animation: "anim_clock", scale: 0.058, colors: [:], title: nil, text: strings.cancelled, customUndoText: nil, timeout: nil), elevatedLayout: false, animateInAsReplacement: false, action: { _ in
+                    return true
+                }), in: .current)
+            })
+        })))
+    }
+    return items
 }

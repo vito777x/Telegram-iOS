@@ -15,6 +15,7 @@ import DeviceAccess
 import TextFormat
 import TelegramBaseController
 import AccountContext
+import ReplyReminders
 import WalletContext
 import TelegramStringFormatting
 import OverlayStatusController
@@ -7845,6 +7846,10 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         super.viewDidAppear(animated)
         
         self.didAppear = true
+        
+        if case let .peer(peerId) = self.chatLocation {
+            ReplyReminderStore.shared.clearDue(peerId: peerId, accountPeerId: self.context.account.peerId)
+        }
         
         self.chatDisplayNode.historyNode.experimentalSnapScrollToItem = false
         self.chatDisplayNode.historyNode.canReadHistory.set(self.computedCanReadHistoryPromise.get())

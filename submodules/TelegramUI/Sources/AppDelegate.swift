@@ -3192,6 +3192,10 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let _ = (accountIdFromNotification(notification, sharedContext: self.sharedContextPromise.get())
         |> deliverOnMainQueue).start(next: { accountId in
+            if notification.request.content.userInfo["replyReminder"] != nil {
+                completionHandler([.banner, .list, .sound])
+                return
+            }
             if let context = self.contextValue {
                 if let accountId = accountId, context.context.account.id != accountId || notification.request.content.userInfo["url"] != nil {
                     completionHandler([.banner, .list])
