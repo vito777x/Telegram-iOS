@@ -15,7 +15,6 @@ import TelegramPresentationData
 import TelegramStringFormatting
 import ChatTimerScreen
 import NotificationPeerExceptionController
-import ReplyReminders
 
 func archiveContextMenuItems(context: AccountContext, group: EngineChatList.Group, chatListController: ChatListControllerImpl?) -> Signal<[ContextMenuItem], NoError> {
     let presentationData = context.sharedContext.currentPresentationData.with({ $0 })
@@ -470,10 +469,6 @@ func chatContextMenuItems(context: AccountContext, peerId: EnginePeer.Id, promoI
                                         f(.default)
                                     })
                                 })))
-                            }
-                            
-                            if !isSavedMessages {
-                                items.append(contentsOf: replyReminderContextMenuItems(context: context, peerId: peerId, peer: peer, chatListController: chatListController))
                             }
                         } else {
                             if case .search = source {
@@ -1064,32 +1059,4 @@ private func openCustomMute(context: AccountContext, peerId: EnginePeer.Id, thre
     })
     baseController.view.endEditing(true)
     baseController.present(controller, in: .window(.root))
-}
-
-// "Remind Me": with no reminders yet it opens the time sheet right away; once the chat has reminders it opens
-// the chat's reminders screen, where they are changed, deleted and new ones added.
-private func replyReminderContextMenuItems(context: AccountContext, peerId: EnginePeer.Id, peer: EnginePeer, chatListController: ChatListControllerImpl?) -> [ContextMenuItem] {
-    let presentationData = context.sharedContext.currentPresentationData.with { $0 }
-    let strings = ReplyReminderStrings(languageCode: presentationData.strings.baseLanguageCode)
-    let reminders = ReplyReminderStore.shared.reminders(peerId: peerId, accountPeerId: context.account.peerId)
-
-    let textLayout: ContextMenuActionItemTextLayout = reminders.isEmpty ? .singleLine : .secondLineWithValue(strings.remindersCount(reminders.count))
-    return [.action(ContextMenuActionItem(text: strings.menuTitle, textLayout: textLayout, icon: { theme in
-        return replyReminderMenuIcon(color: theme.contextMenu.primaryColor)
-    }, action: { [weak chatListController] c, _ in
-        c?.dismiss(completion: {
-            guard let chatListController else {
-                return
-            }
-            if reminders.isEmpty {
-                presentReplyReminderEditor(context: context, peerId: peerId, peer: peer, push: { [weak chatListController] controller in
-                    chatListController?.push(controller)
-                }, present: { [weak chatListController] controller in
-                    chatListController?.present(controller, in: .current)
-                })
-            } else if let navigationController = chatListController.navigationController as? NavigationController {
-                openReplyRemindersScreen(context: context, peerId: peerId, peer: peer, navigationController: navigationController)
-            }
-        })
-    }))]
 }
