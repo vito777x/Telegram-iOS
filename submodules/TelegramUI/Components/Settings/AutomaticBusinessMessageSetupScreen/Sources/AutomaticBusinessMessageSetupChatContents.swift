@@ -210,7 +210,7 @@ final class AutomaticBusinessMessageSetupChatContents: ChatCustomContentsProtoco
             initialShortcut = ""
         case .hashTagSearch:
             initialShortcut = ""
-        case .welcomeMessages:
+        case .welcomeMessages, .replyReminders:
             initialShortcut = ""
         }
         
@@ -250,7 +250,7 @@ final class AutomaticBusinessMessageSetupChatContents: ChatCustomContentsProtoco
             break
         case .hashTagSearch:
             break
-        case .welcomeMessages:
+        case .welcomeMessages, .replyReminders:
             break
         }
     }

@@ -127,6 +127,7 @@ import ChatSendAsContextMenu
 import GlobalControlPanelsContext
 import ComponentFlow
 import ComponentDisplayAdapters
+import ReplyReminders
 
 extension ChatControllerImpl {
     func reloadChatLocation(chatLocation: ChatLocation, chatLocationContextHolder: Atomic<ChatLocationContextHolder?>, historyNode: ChatHistoryListNodeImpl, apply: @escaping ((ContainedViewLayoutTransition?) -> Void) -> Void) {
@@ -896,6 +897,14 @@ extension ChatControllerImpl {
             guard let self else {
                 return
             }
+            if case let .customChatContents(customChatContents) = self.presentationInterfaceState.subject, case .replyReminders = customChatContents.kind, self.presentationInterfaceState.interfaceState.composeInputState.inputText.length == 0 {
+                // A voice recording on the reminders screen becomes a note, not a message: no new message will update
+                // the list, so the recording UI would wait for it forever (its checkmark stayed over the reminder sheet).
+                DispatchQueue.main.async {
+                    f()
+                }
+                return
+            }
             self.layoutActionOnViewTransitionAction = f
             
             if !enableSendAnimationV2 {
@@ -1135,7 +1144,7 @@ extension ChatControllerImpl {
                 switch customChatContents.kind {
                 case .hashTagSearch:
                     break
-                case .quickReplyMessageInput, .welcomeMessages:
+                case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                     customChatContents.enqueueMessages(messages: messages)
                     strongSelf.chatDisplayNode.historyNode.scrollToEndOfHistory()
                 case let .businessLinkSetup(link):
@@ -3043,6 +3052,10 @@ extension ChatControllerImpl {
             guard let strongSelf = self else {
                 return
             }
+            if case let .customChatContents(customChatContents) = strongSelf.presentationInterfaceState.subject, case .replyReminders = customChatContents.kind {
+                // The reminders screen records voice notes only.
+                return
+            }
             
             var bannedMediaInput = false
             if let peer = strongSelf.presentationInterfaceState.renderedPeer?.peer {
@@ -3997,7 +4010,7 @@ extension ChatControllerImpl {
             chatMessageDisplaySendMessageOptions(selfController: self, node: node, gesture: gesture)
         }, openScheduledMessages: { [weak self] in
             if let strongSelf = self {
-                strongSelf.openScheduledMessages()
+                strongSelf.openScheduledMessagesOrReplyReminders()
             }
         }, displaySearchResultsTooltip: { [weak self] node, nodeRect in
             if let strongSelf = self {
@@ -4868,6 +4881,13 @@ extension ChatControllerImpl {
             return self
         }, statuses: ChatPanelInterfaceInteractionStatuses(editingMessage: self.editingMessage.get(), startingBot: self.startingBot.get(), unblockingPeer: self.unblockingPeer.get(), searching: self.searching.get(), loadingMessage: self.loadingMessage.get(), inlineSearch: self.performingInlineSearch.get()))
         
+        interfaceInteraction.openReplyReminders = { [weak self] in
+            guard let self, case let .peer(peerId) = self.chatLocation, let peer = self.presentationInterfaceState.renderedPeer?.peer, let navigationController = self.effectiveNavigationController else {
+                return
+            }
+            self.chatDisplayNode.dismissInput()
+            openReplyRemindersScreen(context: self.context, peerId: peerId, peer: EnginePeer(peer), navigationController: navigationController)
+        }
         self.interfaceInteraction = interfaceInteraction
         
         if let search = self.focusOnSearchAfterAppearance {

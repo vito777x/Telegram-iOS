@@ -493,27 +493,91 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
     guard let interfaceInteraction = interfaceInteraction, let controllerInteraction = controllerInteraction else {
         return .single(ContextController.Items(content: .list([])))
     }
+    if let message = messages.first, case let .customChatContents(customChatContents) = chatPresentationInterfaceState.subject, case .replyReminders = customChatContents.kind {
+        // A reminder on the reminders screen: Change / Show Message / Delete. These messages are not stored anywhere,
+        // so the regular menu (which looks them up) is skipped.
+        guard let reminder = replyReminderForDisplayMessage(context: context, messageId: message.id) else {
+            return .single(ContextController.Items(content: .list([])))
+        }
+        let reminderStrings = ReplyReminderStrings(languageCode: chatPresentationInterfaceState.strings.baseLanguageCode)
+        let peerId = message.id.peerId
+        var actions: [ContextMenuItem] = []
+        actions.append(.action(ContextMenuActionItem(text: reminderStrings.menuChangeTitle, textLayout: .secondLineWithValue(reminderStrings.relativeWhen(reminder.time)), icon: { theme in
+            return replyReminderMenuIcon(color: theme.actionSheet.primaryTextColor)
+        }, action: { c, _ in
+            c?.dismiss(completion: {
+                let _ = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: peerId))
+                |> deliverOnMainQueue).startStandalone(next: { peer in
+                    guard let peer else {
+                        return
+                    }
+                    presentReplyReminderEditor(context: context, peerId: peerId, peer: peer, reminder: reminder, push: { controller in
+                        controllerInteraction.navigationController()?.pushViewController(controller)
+                    }, present: { controller in
+                        controllerInteraction.presentControllerInCurrent(controller, nil)
+                    })
+                })
+            })
+        })))
+        if let linkedMessageId = reminder.linkedMessageId {
+            actions.append(.action(ContextMenuActionItem(text: reminderStrings.showMessage, icon: { theme in
+                return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/GoToMessage"), color: theme.actionSheet.primaryTextColor)
+            }, action: { c, _ in
+                c?.dismiss(completion: {
+                    let _ = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: peerId))
+                    |> deliverOnMainQueue).startStandalone(next: { peer in
+                        guard let peer, let navigationController = controllerInteraction.navigationController() else {
+                            return
+                        }
+                        context.sharedContext.navigateToChatController(NavigateToChatControllerParams(navigationController: navigationController, context: context, chatLocation: .peer(peer), subject: .message(id: .id(linkedMessageId), highlight: ChatControllerSubject.MessageHighlight(quote: nil), timecode: nil, setupReply: false), keepStack: .always, useExisting: true))
+                    })
+                })
+            })))
+        }
+        actions.append(.action(ContextMenuActionItem(text: reminderStrings.deleteReminder, textColor: .destructive, icon: { theme in
+            return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Delete"), color: theme.actionSheet.destructiveActionTextColor)
+        }, action: { c, _ in
+            c?.dismiss(completion: {
+                cancelReplyReminder(context: context, reminder: reminder)
+            })
+        })))
+        return .single(ContextController.Items(content: .list(actions)))
+    }
     if let message = messages.first {
         if message.id.namespace < 0 {
             return .single(ContextController.Items(content: .list([])))
         }
         if message.id.namespace == Namespaces.Message.Local, message.author?.id == context.account.peerId, let action = message.media.first(where: { $0 is TelegramMediaAction }) as? TelegramMediaAction, case .customText = action.action {
-            // Local reminder lines: Change / Delete the reminder instead of Reply, which makes no sense for a local line.
+            // Local reminder lines: Change / Show Message / Delete instead of Reply, which makes no sense for a local line.
             let reminderStrings = ReplyReminderStrings(languageCode: chatPresentationInterfaceState.strings.baseLanguageCode)
             let present: (ViewController) -> Void = { controller in
                 controllerInteraction.presentControllerInCurrent(controller, nil)
             }
+            // The message the reminder was set from; fired lines keep it as their reply.
+            let linkedMessageId = (message.attributes.first(where: { $0 is ReplyMessageAttribute }) as? ReplyMessageAttribute)?.messageId
+            let showMessageAction: ContextMenuItem? = linkedMessageId.flatMap { linkedMessageId in
+                return .action(ContextMenuActionItem(text: reminderStrings.showMessage, icon: { theme in
+                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/GoToMessage"), color: theme.actionSheet.primaryTextColor)
+                }, action: { c, _ in
+                    c?.dismiss(completion: {
+                        controllerInteraction.navigateToMessage(message.id, linkedMessageId, NavigateToMessageParams())
+                    })
+                }))
+            }
             var actions: [ContextMenuItem] = []
             if let reminder = replyReminderForLocalMessage(context: context, messageId: message.id), let peer = message.peers[message.id.peerId] {
                 actions.append(.action(ContextMenuActionItem(text: reminderStrings.menuChangeTitle, textLayout: .secondLineWithValue(reminderStrings.relativeWhen(reminder.time)), icon: { theme in
-                    return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Schedule"), color: theme.actionSheet.primaryTextColor)
+                    return replyReminderMenuIcon(color: theme.actionSheet.primaryTextColor)
                 }, action: { c, _ in
                     c?.dismiss(completion: {
-                        presentReplyReminderEditor(context: context, peerId: message.id.peerId, peer: EnginePeer(peer), push: { controller in
+                        presentReplyReminderEditor(context: context, peerId: message.id.peerId, peer: EnginePeer(peer), reminder: reminder, push: { controller in
                             controllerInteraction.navigationController()?.pushViewController(controller)
                         }, present: present)
                     })
                 })))
+                if let showMessageAction {
+                    actions.append(showMessageAction)
+                }
                 actions.append(.action(ContextMenuActionItem(text: reminderStrings.deleteReminder, textColor: .destructive, icon: { theme in
                     return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Delete"), color: theme.actionSheet.destructiveActionTextColor)
                 }, action: { c, _ in
@@ -522,6 +586,9 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
                     })
                 })))
             } else {
+                if let showMessageAction {
+                    actions.append(showMessageAction)
+                }
                 actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.Conversation_ContextMenuDelete, textColor: .destructive, icon: { theme in
                     return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Delete"), color: theme.actionSheet.destructiveActionTextColor)
                 }, action: { c, _ in
@@ -1981,6 +2048,22 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
             })))
         }
 
+        // "Remind Me" on a message: a personal reminder about it; its line in the chat leads back to the message.
+        if message.id.namespace == Namespaces.Message.Cloud, case .peer = chatPresentationInterfaceState.chatLocation, case .standard(.default) = chatPresentationInterfaceState.mode, chatPresentationInterfaceState.subject == nil, let peer = message.peers[message.id.peerId] {
+            let reminderStrings = ReplyReminderStrings(languageCode: chatPresentationInterfaceState.strings.baseLanguageCode)
+            actions.append(.action(ContextMenuActionItem(text: reminderStrings.menuTitle, icon: { theme in
+                return replyReminderMenuIcon(color: theme.actionSheet.primaryTextColor)
+            }, action: { c, _ in
+                c?.dismiss(completion: {
+                    presentReplyReminderEditor(context: context, peerId: message.id.peerId, peer: EnginePeer(peer), message: EngineMessage(message), push: { controller in
+                        controllerInteraction.navigationController()?.pushViewController(controller)
+                    }, present: { controller in
+                        controllerInteraction.presentControllerInCurrent(controller, nil)
+                    })
+                })
+            })))
+        }
+        
         if data.messageActions.options.contains(.forward) {
             if !isCopyProtected {
                 actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.Conversation_ContextMenuForward, icon: { theme in
@@ -2373,7 +2456,7 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
         
         if let message = messages.first, case let .customChatContents(customChatContents) = chatPresentationInterfaceState.subject {
             switch customChatContents.kind {
-            case .hashTagSearch:
+            case .hashTagSearch, .replyReminders:
                 break
             case .quickReplyMessageInput, .welcomeMessages:
                 actions.removeAll()

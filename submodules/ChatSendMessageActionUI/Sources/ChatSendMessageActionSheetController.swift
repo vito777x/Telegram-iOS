@@ -91,7 +91,8 @@ public func makeChatSendMessageActionSheetController(
     reactionItems: [ReactionItem]? = nil,
     availableMessageEffects: AvailableMessageEffects? = nil,
     isPremium: Bool = false,
-    richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil
+    richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil,
+    extraAction: ChatSendMessageContextScreenExtraAction? = nil
 ) -> ChatSendMessageActionSheetController {
     return ChatSendMessageContextScreen(
         initialData: initialData,
@@ -113,6 +114,7 @@ public func makeChatSendMessageActionSheetController(
         reactionItems: reactionItems,
         availableMessageEffects: availableMessageEffects,
         isPremium: isPremium,
-        richTextPreview: richTextPreview
+        richTextPreview: richTextPreview,
+        extraAction: extraAction
     )
 }

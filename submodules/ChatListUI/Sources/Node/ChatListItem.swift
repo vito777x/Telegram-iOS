@@ -1466,7 +1466,9 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
     
     var layoutParams: (ChatListItem, first: Bool, last: Bool, firstWithHeader: Bool, nextIsPinned: Bool, nextHasActiveRevealControls: Bool, ListViewItemLayoutParams, countersSize: CGFloat)?
     
-    private let replyReminderDisposable = MetaDisposable()
+    private let replyReminderAnchorDisposable = MetaDisposable()
+    private let replyReminderDueDisposable = MetaDisposable()
+    private let replyReminderBadgeAnchorDisposable = MetaDisposable()
     private var replyReminderPeerId: EnginePeer.Id?
     private var replyReminderIgnoreNextUpdate = false
     
@@ -1835,11 +1837,12 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
 
     deinit {
         self.cachedDataDisposable.dispose()
-        self.replyReminderDisposable.dispose()
+        self.replyReminderAnchorDisposable.dispose()
+        self.replyReminderDueDisposable.dispose()
+        self.replyReminderBadgeAnchorDisposable.dispose()
     }
     
-    // Re-lays out the row when its "remind to reply" state changes (set, cancelled, or became due),
-    // since reminders are not part of the chat list entries.
+    // Registers the row as the place reminder animations of its chat point at.
     private func updateReplyReminderSubscription(item: ChatListItem) {
         var peerId: EnginePeer.Id?
         if case let .peer(peerData) = item.content, peerData.threadInfo == nil {
@@ -1850,25 +1853,43 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
         }
         self.replyReminderPeerId = peerId
         guard let peerId else {
-            self.replyReminderDisposable.set(nil)
+            self.replyReminderAnchorDisposable.set(nil)
+            self.replyReminderDueDisposable.set(nil)
+            self.replyReminderBadgeAnchorDisposable.set(nil)
             return
         }
+        self.replyReminderBadgeAnchorDisposable.set(ReplyReminderAnchors.shared.register(peerId: peerId, kind: .chatListBadge, provider: { [weak self] _ in
+            return self?.replyReminderBadgeAnchor()
+        }))
+        self.replyReminderAnchorDisposable.set(ReplyReminderAnchors.shared.register(peerId: peerId, kind: .chatListRow, provider: { [weak self] _ in
+            return self?.replyReminderAnchor()
+        }))
+        
+        // Reminders are not part of the chat list entries, so the row re-lays itself out when one of its chat
+        // fires (it then shows the note and an unread dot) and when opening the chat clears it.
         let peerIdValue = peerId.toInt64()
-        let signal: Signal<ReplyReminder?, NoError> = ReplyReminderStore.shared.reminders(accountPeerId: item.context.account.peerId)
-        |> map { reminders -> ReplyReminder? in
-            return reminders.filter { $0.peerId == peerIdValue }.min(by: { $0.time < $1.time })
+        let signal: Signal<String, NoError> = ReplyReminderStore.shared.reminders(accountPeerId: item.context.account.peerId)
+        |> map { reminders -> [ReplyReminder] in
+            return reminders.filter { $0.peerId == peerIdValue }
+        }
+        |> mapToSignal { reminders -> Signal<String, NoError> in
+            let state: () -> String = {
+                return reminders.filter { $0.isDue }.map { "\($0.id):\($0.time)" }.sorted().joined(separator: ",")
+            }
+            guard let next = reminders.filter({ !$0.isDue }).min(by: { $0.time < $1.time }) else {
+                return .single(state())
+            }
+            let delayValue = max(0.0, Double(next.time) - Date().timeIntervalSince1970) + 0.5
+            return .single(state()) |> then(Signal<String, NoError> { subscriber in
+                subscriber.putNext(state())
+                subscriber.putCompletion()
+                return EmptyDisposable
+            } |> delay(delayValue, queue: Queue.mainQueue()))
         }
         |> distinctUntilChanged
-        |> mapToSignal { reminder -> Signal<ReplyReminder?, NoError> in
-            guard let reminder, !reminder.isDue else {
-                return .single(reminder)
-            }
-            let delayValue = max(0.0, Double(reminder.time) - Date().timeIntervalSince1970) + 0.5
-            return .single(reminder) |> then(.single(reminder) |> delay(delayValue, queue: Queue.mainQueue()))
-        }
         |> deliverOnMainQueue
         self.replyReminderIgnoreNextUpdate = true
-        self.replyReminderDisposable.set(signal.startStrict(next: { [weak self] _ in
+        self.replyReminderDueDisposable.set(signal.startStrict(next: { [weak self] _ in
             guard let self else {
                 return
             }
@@ -1882,6 +1903,44 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
             let (_, apply) = self.asyncLayout()(item, params, first, last, firstWithHeader, nextIsPinned, nextHasActiveRevealControls)
             apply(false, false)
         }))
+    }
+    
+    // The unread dot: the paper plane of a reminder that fired turns into it.
+    private func replyReminderBadgeAnchor() -> ReplyReminderAnchor? {
+        guard let item = self.item, self.replyReminderPeerId != nil, let window = self.view.window, !self.badgeNode.bounds.isEmpty, self.badgeNode.alpha > 0.0 else {
+            return nil
+        }
+        let frame = self.badgeNode.view.convert(self.badgeNode.bounds, to: window)
+        return ReplyReminderAnchor(
+            frame: frame,
+            cornerRadius: frame.height / 2.0,
+            color: item.presentationData.theme.chatList.unreadBadgeActiveBackgroundColor,
+            sourceView: self.view,
+            hiddenView: self.badgeNode.view,
+            land: nil
+        )
+    }
+    
+    // The row's date: the reminder sheet collapses into it and the bell from the Dynamic Island lands on it.
+    private func replyReminderAnchor() -> ReplyReminderAnchor? {
+        guard let item = self.item, self.replyReminderPeerId != nil, let window = self.view.window, !self.dateNode.bounds.isEmpty else {
+            return nil
+        }
+        let dateNode = self.dateNode
+        let labelFrame = dateNode.view.convert(dateNode.bounds, to: window).insetBy(dx: -6.0, dy: -3.0)
+        return ReplyReminderAnchor(
+            frame: labelFrame,
+            cornerRadius: labelFrame.height / 2.0,
+            color: item.presentationData.theme.list.itemAccentColor.withMultipliedAlpha(0.18),
+            sourceView: self.view,
+            hiddenView: nil,
+            land: { [weak self] in
+                guard let self else {
+                    return
+                }
+                replyReminderPlayLandAnimation(layer: self.dateNode.layer)
+            }
+        )
     }
     
     override public func secondaryAction(at point: CGPoint) {
@@ -3399,6 +3458,22 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
             attributedText = renderInstantPagePreviewIcons(attributedText, font: textFont, textColor: theme.messageTextColor)
             textAttributedString = attributedText
             
+            // A reminder that fired and was not looked at yet takes the place of the last message, like a new message would.
+            var dueReplyReminder: ReplyReminder?
+            if case let .peer(peerData) = item.content, peerData.threadInfo == nil {
+                dueReplyReminder = ReplyReminderStore.shared.reminders(peerId: peerData.peer.peerId, accountPeerId: item.context.account.peerId).filter { $0.isDue }.last
+            }
+            if let dueReplyReminder {
+                let reminderStrings = ReplyReminderStrings(languageCode: item.presentationData.strings.baseLanguageCode)
+                let reminderText = NSMutableAttributedString(string: reminderStrings.chatListFiredTitle(time: dueReplyReminder.time), font: textFont, textColor: item.presentationData.theme.list.itemAccentColor)
+                if let subject = dueReplyReminder.subject {
+                    reminderText.append(NSAttributedString(string: ": " + subject.replacingOccurrences(of: "\n", with: " "), font: textFont, textColor: theme.messageTextColor))
+                }
+                textAttributedString = reminderText
+                authorAttributedString = nil
+                contentImageSpecs.removeAll()
+            }
+            
             let dateText: String
             var topIndex: EngineMessage.Index?
             switch item.content {
@@ -3425,7 +3500,6 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                 dateText = ""
             }
             
-            var replyReminderIconColor: UIColor?
             if isPeerGroup {
                 dateAttributedString = NSAttributedString(string: "", font: dateFont, textColor: theme.dateTextColor)
             } else if let promoInfo = promoInfo {
@@ -3442,17 +3516,21 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                     }
                     dateAttributedString = NSAttributedString(string: text, font: dateFont, textColor: theme.dateTextColor)
                 }
-            } else if case let .peer(peerData) = item.content, peerData.threadInfo == nil, let reminder = ReplyReminderStore.shared.reminder(peerId: peerData.peer.peerId, accountPeerId: item.context.account.peerId) {
-                let reminderStrings = ReplyReminderStrings(languageCode: item.presentationData.strings.baseLanguageCode)
-                let reminderColor = reminder.isDue ? item.presentationData.theme.list.itemDestructiveColor : item.presentationData.theme.list.itemAccentColor
-                replyReminderIconColor = reminderColor
-                dateAttributedString = NSAttributedString(string: reminderStrings.chatListLabel(reminder), font: dateFont, textColor: reminderColor)
             } else {
                 dateAttributedString = NSAttributedString(string: dateText, font: dateFont, textColor: theme.dateTextColor)
             }
             
             if !isPeerGroup, let message = messages.last, message.author?.id == account.peerId && !hasDraft {
-                if message.flags.isSending && !message._asMessage().isSentOrAcknowledged {
+                if message.id.namespace == Namespaces.Message.Local, message.media.contains(where: { media in
+                    if let action = media as? TelegramMediaAction, case .customText = action.action {
+                        return true
+                    }
+                    return false
+                }) {
+                    // The line of a reminder that fired: only this device has it and nobody else reads it, so it is
+                    // shown as read rather than as delivered and waiting.
+                    statusState = .read(item.presentationData.theme.chatList.checkmarkColor)
+                } else if message.flags.isSending && !message._asMessage().isSentOrAcknowledged {
                     statusState = .clock(PresentationResourcesChatList.clockFrameImage(item.presentationData.theme), PresentationResourcesChatList.clockMinImage(item.presentationData.theme))
                 } else if message.id.peerId != account.peerId {
                     if hasFailedMessages {
@@ -3475,8 +3553,8 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                 }
             }
             
-            if replyReminderIconColor != nil {
-                // The reminder label replaces the date; a delivery checkmark next to it would be misleading.
+            if dueReplyReminder != nil {
+                // The delivery checkmark belongs to the last message, which the reminder has replaced.
                 statusState = .none
             }
             
@@ -3517,6 +3595,11 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                     currentMentionBadgeImage = PresentationResourcesChatList.badgeBackgroundInactive(item.presentationData.theme, diameter: badgeDiameter)
                     mentionBadgeContent = .text(NSAttributedString(string: mutedUnreadCountText, font: badgeFont, textColor: theme.unreadBadgeInactiveTextColor))
                 }
+            } else if dueReplyReminder != nil {
+                // A blue dot without a number, like a chat marked as unread.
+                currentBadgeBackgroundImage = PresentationResourcesChatList.badgeBackgroundActive(item.presentationData.theme, diameter: badgeDiameter)
+                currentAvatarBadgeBackgroundImage = PresentationResourcesChatList.badgeBackgroundActive(item.presentationData.theme, diameter: avatarBadgeDiameter)
+                badgeContent = .blank
             }
 
             if !isPeerGroup {
@@ -3583,8 +3666,6 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
             var dateIconImage: UIImage?
             if let threadInfo, threadInfo.isClosed {
                 dateIconImage = PresentationResourcesChatList.statusLockIcon(item.presentationData.theme)
-            } else if let replyReminderIconColor {
-                dateIconImage = replyReminderDateIcon(color: replyReminderIconColor)
             }
             
             if let dateIconImage {
@@ -6007,25 +6088,4 @@ private class StarView: UIView {
         self.outline.frame = self.bounds
         self.foreground.frame = self.bounds
     }
-}
-
-private var replyReminderDateIconCache: [UInt32: UIImage] = [:]
-
-// Small clock shown before the reminder time in place of the message date.
-private func replyReminderDateIcon(color: UIColor) -> UIImage? {
-    let key = color.argb
-    if let cached = replyReminderDateIconCache[key] {
-        return cached
-    }
-    guard let source = generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Time"), color: color), let cgImage = source.cgImage else {
-        return nil
-    }
-    let image = generateImage(CGSize(width: 14.0, height: 14.0), rotatedContext: { size, context in
-        context.clear(CGRect(origin: CGPoint(), size: size))
-        context.draw(cgImage, in: CGRect(origin: CGPoint(x: -1.5, y: -1.5), size: CGSize(width: size.width + 3.0, height: size.height + 3.0)))
-    })
-    if let image {
-        replyReminderDateIconCache[key] = image
-    }
-    return image
 }

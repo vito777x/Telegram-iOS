@@ -293,7 +293,7 @@ func updateChatPresentationInterfaceStateImpl(
             break
         case .welcomeMessages:
             break
-        case .businessLinkSetup:
+        case .businessLinkSetup, .replyReminders:
             canHaveUrlPreview = false
         }
     }

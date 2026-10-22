@@ -61,6 +61,8 @@ private final class ChatEmptyNodeRegularChatContent: ASDisplayNode, ChatEmptyNod
                 case .peer, .replyThread, .customChatContents:
                     if case .scheduledMessages = interfaceState.subject {
                         text = interfaceState.strings.ScheduledMessages_EmptyPlaceholder
+                    } else if case let .customChatContents(customChatContents) = interfaceState.subject, case let .replyReminders(presentation) = customChatContents.kind {
+                        text = presentation.emptyText
                     } else {
                         text = interfaceState.strings.Conversation_EmptyPlaceholder
                     }
@@ -602,7 +604,7 @@ private final class ChatEmptyNodeCloudChatContent: ASDisplayNode, ChatEmptyNodeC
             maxWidth = min(240.0, maxWidth)
             
             switch customChatContents.kind {
-            case .quickReplyMessageInput, .welcomeMessages:
+            case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                 insets.top = 10.0
                 imageSpacing = 5.0
                 titleSpacing = 5.0
@@ -680,6 +682,12 @@ private final class ChatEmptyNodeCloudChatContent: ASDisplayNode, ChatEmptyNodeC
                     titleString = interfaceState.strings.WelcomeMessages_EmptyTitle
                     strings = [
                         interfaceState.strings.WelcomeMessages_EmptyText
+                    ]
+                case let .replyReminders(presentation):
+                    centerText = true
+                    titleString = presentation.emptyTitle
+                    strings = [
+                        presentation.emptyText
                     ]
                 }
             } else {
@@ -1663,8 +1671,12 @@ public final class ChatEmptyNode: ASDisplayNode {
         case let .emptyChat(emptyType):
             if case .customGreeting = emptyType {
                 contentType = .greeting
-            } else if case .customChatContents = interfaceState.subject {
-                contentType = .cloud
+            } else if case let .customChatContents(customChatContents) = interfaceState.subject {
+                if case .replyReminders = customChatContents.kind {
+                    contentType = .regular
+                } else {
+                    contentType = .cloud
+                }
             } else if case .replyThread = interfaceState.chatLocation {
                 if case .topic = emptyType {
                     contentType = .topic

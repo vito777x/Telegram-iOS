@@ -199,6 +199,10 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
     public var offsetRecordingControls: () -> Void = { }
     public var switchMode: () -> Void = { }
     public var updateLocked: (Bool) -> Void = { _ in }
+    // For a recording that becomes a reminder note: once locked, the send arrow is a checkmark and there is no
+    // pause button, since the recording is only taken over, not sent or previewed.
+    public var confirmsOnLock: Bool = false
+    private weak var lockPanelView: UIView?
     public var updateCancelTranslation: () -> Void = { }
     
     private var modeTimeoutTimer: SwiftSignalKit.Timer?
@@ -360,7 +364,8 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
         if let current = self.micLockValue {
             return current
         } else {
-            let lockView = LockView(frame: CGRect(origin: CGPoint(), size: CGSize(width: 40.0, height: 60.0)), theme: self.theme, useDarkTheme: self.useDarkTheme, pause: self.pause, strings: self.strings)
+            // A recording confirmed with a checkmark has no pause: the lock never turns into one.
+            let lockView = LockView(frame: CGRect(origin: CGPoint(), size: CGSize(width: 40.0, height: 60.0)), theme: self.theme, useDarkTheme: self.useDarkTheme, pause: self.pause && !self.confirmsOnLock, strings: self.strings)
             lockView.addTarget(self, action: #selector(handleStopTap), for: .touchUpInside)
             self.micLockValue = lockView
             return lockView
@@ -508,6 +513,7 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
         }
         
         let view = WrapperBlurrredBackgroundView(size: CGSize(width: 40.0, height: 72.0), isDark: isDark, tintColor: tintColor)
+        self.lockPanelView = view
         return view
     }
     
@@ -562,6 +568,22 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
     
     public func micButtonInteractionLocked() {
         self.updateLocked(true)
+        if self.confirmsOnLock {
+            // Gone at once, before the locked panel (which would show the pause button) appears at all.
+            self.lockPanelView?.layer.removeAllAnimations()
+            self.lockPanelView?.alpha = 0.0
+            // The button has just put its send arrow in; replace it once that is done.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.locked else {
+                    return
+                }
+                let color = self.pallete?.iconColor ?? .white
+                if let checkmark = UIImage(systemName: "checkmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 21.0, weight: .bold))?.withTintColor(color, renderingMode: .alwaysOriginal) {
+                    self.icon = checkmark
+                }
+                self.lockPanelView?.alpha = 0.0
+            }
+        }
     }
     
     public func micButtonInteractionRequestedLockedAction() {
@@ -604,6 +626,8 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
             self.finishDecorationFlight(flightId: self.decorationFlightId)
         }
         self.isAnimatingOut = false
+        // Hidden by the previous locked recording when it confirms instead of pausing.
+        self.lockPanelView?.alpha = 1.0
         
         super.animateIn()
         
@@ -628,6 +652,16 @@ public final class ChatTextInputMediaRecordingButton: TGModernConversationInputM
     override public func animateOut(_ toSmallSize: Bool) {
         self.isAnimatingOut = true
         super.animateOut(toSmallSize)
+        if self.confirmsOnLock {
+            // The recording becomes a reminder note and a sheet opens right away; that can interrupt the animation
+            // that would remove the recording UI, which then stayed on top with its checkmark. Remove it in any case.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.isAnimatingOut else {
+                    return
+                }
+                self.dismiss()
+            }
+        }
         
         micDecoration.stopAnimating()
         

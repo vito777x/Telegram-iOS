@@ -5,10 +5,12 @@ import TelegramCore
 import UserNotifications
 import Intents
 import Postbox
+import ChatMessageNotificationItem
 import PushKit
 import AsyncDisplayKit
 import TelegramUIPreferences
 import TelegramPresentationData
+import ReplyReminders
 import TelegramCallsUI
 import TelegramVoip
 import BuildConfig
@@ -3193,6 +3195,34 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
         let _ = (accountIdFromNotification(notification, sharedContext: self.sharedContextPromise.get())
         |> deliverOnMainQueue).start(next: { accountId in
             if notification.request.content.userInfo["replyReminder"] != nil {
+                // App is open: instead of the system banner, the reminder rings out of the Dynamic Island.
+                if UIApplication.shared.applicationState == .active, let window = self.window, let context = self.contextValue?.context, accountId == nil || accountId == context.account.id, let peerIdValue = (notification.request.content.userInfo["peerId"] as? NSNumber)?.int64Value {
+                    let peerId = PeerId(peerIdValue)
+                    let content = notification.request.content
+                    let reminderId = content.userInfo["replyReminderId"] as? String
+                    let reminder = reminderId.flatMap { ReplyReminderStore.shared.reminder(id: $0) }
+                    // The line goes into the chat right away, so a preview of the chat already shows it.
+                    materializeDueReplyReminder(context: context, peerId: peerId, strings: ReplyReminderStrings(languageCode: context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode))
+                    ReplyReminderAnchors.shared.fire(peerId: peerId)
+                    let reminderStrings = ReplyReminderStrings(languageCode: context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode)
+                    let text = reminder.flatMap { reminderStrings.notificationText(subject: $0.subject) } ?? content.body
+                    let open: () -> Void = {
+                        self.openChatWhenReady(accountId: accountId, peerId: peerId, threadId: nil, storyId: nil)
+                    }
+                    // The paper plane only when it has somewhere to land: the chat itself or its chat list row.
+                    // Anywhere else (another chat, a browser, a mini app) it comes as a regular in-app message banner.
+                    var isChatOpen = false
+                    if let topController = self.contextValue?.rootController.topViewController as? ChatControllerImpl, case let .peer(topPeerId) = topController.chatLocation, topPeerId == peerId, topController.presentationInterfaceState.subject == nil {
+                        isChatOpen = true
+                    }
+                    if isChatOpen || ReplyReminderAnchors.shared.landingAnchor(peerId: peerId, reminderId: reminderId) != nil {
+                        presentReplyReminderIslandAlert(window: window, peerId: peerId, reminderId: reminderId, title: reminder?.peerTitle ?? content.title, text: text, open: open)
+                    } else {
+                        self.presentReplyReminderBanner(context: context, peerId: peerId, text: text, open: open)
+                    }
+                    completionHandler([.list, .sound])
+                    return
+                }
                 completionHandler([.banner, .list, .sound])
                 return
             }
@@ -3201,6 +3231,51 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     completionHandler([.banner, .list])
                 }
             }
+        })
+    }
+    
+    // A reminder that fired while the app is open on some other screen: Telegram's own banner, as if the chat sent
+    // "📝 Reminder: note", with the chat's photo and name.
+    private func presentReplyReminderBanner(context: AccountContext, peerId: PeerId, text: String, open: @escaping () -> Void) {
+        let _ = (context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: peerId))
+        |> deliverOnMainQueue).start(next: { [weak self] peer in
+            guard let self, let peer, let applicationContext = self.contextValue else {
+                return
+            }
+            var peers = SimpleDictionary<PeerId, Peer>()
+            peers[peer.id] = peer._asPeer()
+            let message = Message(
+                stableId: UInt32.max - 7,
+                stableVersion: 0,
+                id: MessageId(peerId: peerId, namespace: Namespaces.Message.Local, id: Int32.max - 7),
+                globallyUniqueId: nil,
+                groupingKey: nil,
+                groupInfo: nil,
+                threadId: nil,
+                timestamp: Int32(Date().timeIntervalSince1970),
+                flags: [.Incoming],
+                tags: [],
+                globalTags: [],
+                localTags: [],
+                customTags: [],
+                forwardInfo: nil,
+                author: peer._asPeer(),
+                text: text,
+                attributes: [],
+                media: [],
+                peers: peers,
+                associatedMessages: SimpleDictionary(),
+                associatedMessageIds: [],
+                associatedMedia: [:],
+                associatedThreadInfo: nil,
+                associatedStories: [:]
+            )
+            let presentationData = context.sharedContext.currentPresentationData.with { $0 }
+            applicationContext.notificationController.enqueue(ChatMessageNotificationItem(context: context, strings: presentationData.strings, dateTimeFormat: presentationData.dateTimeFormat, nameDisplayOrder: presentationData.nameDisplayOrder, messages: [message], threadData: nil, tapAction: {
+                open()
+                return false
+            }, expandAction: { _ in
+            }))
         })
     }
     

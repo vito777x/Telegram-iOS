@@ -1066,30 +1066,30 @@ private func openCustomMute(context: AccountContext, peerId: EnginePeer.Id, thre
     baseController.present(controller, in: .window(.root))
 }
 
-// "Remind Me": opens the date and time picker right away; an existing reminder is updated or deleted from the same sheet.
+// "Remind Me": with no reminders yet it opens the time sheet right away; once the chat has reminders it opens
+// the chat's reminders screen, where they are changed, deleted and new ones added.
 private func replyReminderContextMenuItems(context: AccountContext, peerId: EnginePeer.Id, peer: EnginePeer, chatListController: ChatListControllerImpl?) -> [ContextMenuItem] {
     let presentationData = context.sharedContext.currentPresentationData.with { $0 }
     let strings = ReplyReminderStrings(languageCode: presentationData.strings.baseLanguageCode)
-    let existingReminder = ReplyReminderStore.shared.reminder(peerId: peerId, accountPeerId: context.account.peerId)
+    let reminders = ReplyReminderStore.shared.reminders(peerId: peerId, accountPeerId: context.account.peerId)
 
-    var items: [ContextMenuItem] = []
-    let textLayout: ContextMenuActionItemTextLayout
-    if let existingReminder, !existingReminder.isDue {
-        textLayout = .secondLineWithValue(strings.relativeWhen(existingReminder.time))
-    } else {
-        textLayout = .singleLine
-    }
-    items.append(.action(ContextMenuActionItem(text: existingReminder != nil ? strings.menuChangeTitle : strings.menuTitle, textLayout: textLayout, icon: { theme in
-        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Schedule"), color: theme.contextMenu.primaryColor)
+    let textLayout: ContextMenuActionItemTextLayout = reminders.isEmpty ? .singleLine : .secondLineWithValue(strings.remindersCount(reminders.count))
+    return [.action(ContextMenuActionItem(text: strings.menuTitle, textLayout: textLayout, icon: { theme in
+        return replyReminderMenuIcon(color: theme.contextMenu.primaryColor)
     }, action: { [weak chatListController] c, _ in
         c?.dismiss(completion: {
-            presentReplyReminderEditor(context: context, peerId: peerId, peer: peer, push: { [weak chatListController] controller in
-                chatListController?.push(controller)
-            }, present: { [weak chatListController] controller in
-                chatListController?.present(controller, in: .current)
-            })
+            guard let chatListController else {
+                return
+            }
+            if reminders.isEmpty {
+                presentReplyReminderEditor(context: context, peerId: peerId, peer: peer, push: { [weak chatListController] controller in
+                    chatListController?.push(controller)
+                }, present: { [weak chatListController] controller in
+                    chatListController?.present(controller, in: .current)
+                })
+            } else if let navigationController = chatListController.navigationController as? NavigationController {
+                openReplyRemindersScreen(context: context, peerId: peerId, peer: peer, navigationController: navigationController)
+            }
         })
-    })))
-
-    return items
+    }))]
 }

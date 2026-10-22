@@ -76,6 +76,21 @@ extension ChatInputTextView: ChatSendMessageContextScreenTextInputSource {
     }
 }
 
+// An extra item of the send button menu, added by the caller (e.g. "Remind Me").
+public struct ChatSendMessageContextScreenExtraAction {
+    public let title: String
+    public let icon: (PresentationTheme) -> UIImage?
+    // Gets a snapshot of the message preview, already placed in the window where the preview was (it is the
+    // caller's to animate and remove), or nil.
+    public let action: (UIView?) -> Void
+
+    public init(title: String, icon: @escaping (PresentationTheme) -> UIImage?, action: @escaping (UIView?) -> Void) {
+        self.title = title
+        self.icon = icon
+        self.action = action
+    }
+}
+
 final class ChatSendMessageContextScreenComponent: Component {
     typealias EnvironmentType = ViewControllerComponentContainer.Environment
     
@@ -99,6 +114,7 @@ final class ChatSendMessageContextScreenComponent: Component {
     let availableMessageEffects: AvailableMessageEffects?
     let isPremium: Bool
     let richTextPreview: ChatSendMessageContextScreenRichTextPreview?
+    let extraAction: ChatSendMessageContextScreenExtraAction?
 
     init(
         initialData: ChatSendMessageContextScreen.InitialData,
@@ -120,7 +136,8 @@ final class ChatSendMessageContextScreenComponent: Component {
         reactionItems: [ReactionItem]?,
         availableMessageEffects: AvailableMessageEffects?,
         isPremium: Bool,
-        richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil
+        richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil,
+        extraAction: ChatSendMessageContextScreenExtraAction? = nil
     ) {
         self.initialData = initialData
         self.context = context
@@ -142,6 +159,7 @@ final class ChatSendMessageContextScreenComponent: Component {
         self.availableMessageEffects = availableMessageEffects
         self.isPremium = isPremium
         self.richTextPreview = richTextPreview
+        self.extraAction = extraAction
     }
 
     static func ==(lhs: ChatSendMessageContextScreenComponent, rhs: ChatSendMessageContextScreenComponent) -> Bool {
@@ -617,6 +635,29 @@ final class ChatSendMessageContextScreenComponent: Component {
                             
                             component.schedule(sendParameters)
                             self.environment?.controller()?.dismiss()
+                        }
+                    )))
+                }
+                if let extraAction = component.extraAction {
+                    items.append(.action(ContextMenuActionItem(
+                        id: AnyHashable("extra"),
+                        text: extraAction.title,
+                        icon: extraAction.icon,
+                        action: { [weak self] _, _ in
+                            guard let self else {
+                                return
+                            }
+                            // The preview leaves with the action instead of returning to the input field.
+                            var snapshot: UIView?
+                            if let messageItemView = self.messageItemView, let window = self.window, let view = messageItemView.snapshotView(afterScreenUpdates: false) {
+                                view.frame = messageItemView.convert(messageItemView.bounds, to: window)
+                                window.addSubview(view)
+                                messageItemView.isHidden = true
+                                snapshot = view
+                            }
+                            self.animateOutToEmpty = true
+                            self.environment?.controller()?.dismiss()
+                            extraAction.action(snapshot)
                         }
                     )))
                 }
@@ -1512,7 +1553,8 @@ public class ChatSendMessageContextScreen: ViewControllerComponentContainer, Cha
         reactionItems: [ReactionItem]?,
         availableMessageEffects: AvailableMessageEffects?,
         isPremium: Bool,
-        richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil
+        richTextPreview: ChatSendMessageContextScreenRichTextPreview? = nil,
+        extraAction: ChatSendMessageContextScreenExtraAction? = nil
     ) {
         self.context = context
 
@@ -1538,7 +1580,8 @@ public class ChatSendMessageContextScreen: ViewControllerComponentContainer, Cha
                 reactionItems: reactionItems,
                 availableMessageEffects: availableMessageEffects,
                 isPremium: isPremium,
-                richTextPreview: richTextPreview
+                richTextPreview: richTextPreview,
+                extraAction: extraAction
             ),
             navigationBarAppearance: .none,
             statusBarStyle: .none,

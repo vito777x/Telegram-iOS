@@ -42,6 +42,9 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
     let silentPosting: Bool
     let externalState: ExternalState
     let dismiss: () -> Void
+    // Closes the sheet by collapsing it into what it created (the reminder line), if there is such a thing.
+    let collapse: (() -> Void)?
+    let noteVoice: ChatScheduleTimeNoteVoice?
     
     init(
         context: AccountContext,
@@ -52,7 +55,9 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
         minimalTime: Int32?,
         silentPosting: Bool,
         externalState: ExternalState,
-        dismiss: @escaping () -> Void
+        dismiss: @escaping () -> Void,
+        collapse: (() -> Void)? = nil,
+        noteVoice: ChatScheduleTimeNoteVoice? = nil
     ) {
         self.context = context
         self.mode = mode
@@ -63,6 +68,8 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
         self.silentPosting = silentPosting
         self.externalState = externalState
         self.dismiss = dismiss
+        self.collapse = collapse
+        self.noteVoice = noteVoice
     }
     
     static func ==(lhs: ChatScheduleTimeSheetContentComponent, rhs: ChatScheduleTimeSheetContentComponent) -> Bool {
@@ -114,8 +121,16 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 
         private var repeatPeriod: Int32?
         
-        private var noteField: UITextField?
-        private let noteFieldDelegate = ReplyReminderNoteFieldDelegate()
+        private var noteField: ReplyReminderNoteField?
+        private var noteMicButton: UIButton?
+        private var noteDictation: ReplyReminderDictation?
+        private var noteRecordingView: ReplyReminderRecordingView?
+        private var didStartNoteVoice = false
+        private let noteVoiceDisposable = MetaDisposable()
+        
+        deinit {
+            self.noteVoiceDisposable.dispose()
+        }
         
         private let dateFormatter: DateFormatter
         
@@ -223,6 +238,232 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             })
         }
         
+        // The microphone in the note field: the field turns into a recording capsule; when it is done, the recognized
+        // text is written into the field with a little magic.
+        @objc private func noteMicPressed() {
+            guard let noteField = self.noteField, let environment = self.environment, self.noteRecordingView == nil else {
+                return
+            }
+            let dictation = ReplyReminderDictation(languageCode: self.component?.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode)
+            self.noteDictation = dictation
+
+            noteField.resignFirstResponder()
+            let recordingView = ReplyReminderRecordingView(theme: environment.theme)
+            recordingView.frame = CGRect(origin: noteField.frame.origin, size: CGSize(width: noteField.frame.width, height: ReplyReminderNoteField.collapsedHeight))
+            self.addSubview(recordingView)
+            self.noteRecordingView = recordingView
+
+            dictation.levelUpdated = { [weak recordingView] level in
+                recordingView?.addLevel(level)
+            }
+            var didStart = false
+            dictation.stateUpdated = { [weak self, weak recordingView] isRunning in
+                if isRunning {
+                    didStart = true
+                    recordingView?.animateIn()
+                } else if !didStart {
+                    self?.removeNoteRecordingView()
+                }
+            }
+            recordingView.done = { [weak self] in
+                self?.finishNoteDictation()
+            }
+            noteField.resignFirstResponder()
+            // The voice replaces whatever was typed: the old text is gone, not hidden under the recording.
+            noteField.text = ""
+            self.updateNotePlaceholder()
+            recordingView.alpha = 0.0
+            dictation.start(prefix: "")
+            // No permission or no recognizer: nothing started, so the capsule does not stay.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: { [weak self, weak dictation] in
+                if !didStart, dictation?.isRunning != true {
+                    self?.removeNoteRecordingView()
+                }
+            })
+        }
+
+        // A voice message from the chat: it flies in once the sheet is up, sits in the field as a waveform while it is
+        // being recognized, then turns into the note.
+        private func startNoteVoice(_ noteVoice: ChatScheduleTimeNoteVoice) {
+            guard let noteField = self.noteField, let environment = self.environment else {
+                return
+            }
+            let recordingView = ReplyReminderRecordingView(theme: environment.theme)
+            recordingView.frame = CGRect(origin: noteField.frame.origin, size: CGSize(width: noteField.frame.width, height: ReplyReminderNoteField.collapsedHeight))
+            recordingView.alpha = 0.0
+            self.addSubview(recordingView)
+            self.noteRecordingView = recordingView
+            noteField.text = ""
+            self.updateNotePlaceholder()
+            recordingView.showVoice(levels: noteVoice.levels)
+
+            var recognizedText: String??
+            var didArrive = false
+            let finish: () -> Void = { [weak self] in
+                guard let self, didArrive, let text = recognizedText else {
+                    return
+                }
+                self.writeRecognizedNote(text)
+            }
+
+            self.noteVoiceDisposable.set((noteVoice.text
+            |> deliverOnMainQueue).startStrict(next: { text in
+                recognizedText = .some(text)
+                finish()
+            }))
+
+            let accentColor = environment.theme.actionSheet.controlAccentColor
+            let arrive: () -> Void = { [weak recordingView] in
+                didArrive = true
+                recordingView?.showProcessing()
+                finish()
+            }
+            // The voice bubble collapses right away; the point it leaves waits for the sheet to be up, then flies
+            // into the note field and bursts into the waveform capsule.
+            var orbView: UIView?
+            var sheetIsUp = false
+            let flyIfReady: () -> Void = { [weak recordingView] in
+                guard sheetIsUp, let orb = orbView, let recordingView, let window = recordingView.window else {
+                    return
+                }
+                orbView = nil
+                ReplyReminderImplosion.burst(orb: orb, into: recordingView, in: window, color: accentColor, completion: arrive)
+            }
+            if let orbOrigin = noteVoice.orbOrigin {
+                // The sheet is not in the window yet on its first layout: the ball pops up as soon as it is.
+                let makeOrb: () -> Void = { [weak recordingView] in
+                    guard orbView == nil, let window = recordingView?.window else {
+                        return
+                    }
+                    orbView = ReplyReminderImplosion.makeOrb(at: orbOrigin, in: window, color: accentColor)
+                }
+                makeOrb()
+                DispatchQueue.main.async(execute: makeOrb)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: makeOrb)
+            } else if let flyingView = noteVoice.flyingView, let window = flyingView.window {
+                ReplyReminderImplosion.collapse(flyingView, in: window, color: accentColor, completion: { orb in
+                    orbView = orb
+                    flyIfReady()
+                })
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: { [weak recordingView] in
+                sheetIsUp = true
+                if orbView == nil, noteVoice.orbOrigin != nil, let window = recordingView?.window {
+                    orbView = ReplyReminderImplosion.makeOrb(at: noteVoice.orbOrigin ?? .zero, in: window, color: accentColor)
+                }
+                if noteVoice.flyingView?.window == nil && orbView == nil {
+                    // Nothing to fly in: the capsule just appears.
+                    UIView.animate(withDuration: 0.25, animations: {
+                        recordingView?.alpha = 1.0
+                    }, completion: { _ in
+                        arrive()
+                    })
+                    return
+                }
+                flyIfReady()
+            })
+        }
+
+        private func writeRecognizedNote(_ text: String?) {
+            guard let noteField = self.noteField, let recordingView = self.noteRecordingView else {
+                return
+            }
+            guard let text, !text.isEmpty else {
+                recordingView.dismissWithShake(completion: { [weak self] in
+                    self?.removeNoteRecordingView()
+                })
+                return
+            }
+            let note = String(text.prefix(500))
+            let textRect = noteField.textRect(forBounds: noteField.bounds)
+            let textFrame = noteField.convert(textRect, to: recordingView)
+            recordingView.writeText(note, font: noteField.font ?? Font.regular(17.0), color: noteField.textColor ?? .black, textFrame: textFrame, completion: { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.noteField?.text = note
+                UIView.animate(withDuration: 0.15, animations: {
+                    self.noteRecordingView?.alpha = 0.0
+                }, completion: { _ in
+                    self.removeNoteRecordingView()
+                })
+            })
+        }
+
+        private func finishNoteDictation() {
+            guard let dictation = self.noteDictation, let recordingView = self.noteRecordingView else {
+                return
+            }
+            recordingView.showProcessing()
+            dictation.finish(completion: { [weak self] text in
+                guard let self, let noteField = self.noteField, let recordingView = self.noteRecordingView else {
+                    return
+                }
+                guard let text, !text.isEmpty else {
+                    recordingView.dismissWithShake(completion: { [weak self] in
+                        self?.removeNoteRecordingView()
+                    })
+                    return
+                }
+                let note = String(text.prefix(500))
+                // Where the field draws its text, so the written-in text lands exactly on it.
+                let textRect = noteField.textRect(forBounds: noteField.bounds)
+                let textFrame = noteField.convert(textRect, to: recordingView)
+                recordingView.writeText(note, font: noteField.font ?? Font.regular(17.0), color: noteField.textColor ?? .black, textFrame: textFrame, completion: { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    self.noteField?.text = note
+                    UIView.animate(withDuration: 0.15, animations: {
+                        self.noteRecordingView?.alpha = 0.0
+                    }, completion: { _ in
+                        self.removeNoteRecordingView()
+                    })
+                })
+            })
+        }
+
+        private func removeNoteRecordingView() {
+            self.noteRecordingView?.removeFromSuperview()
+            self.noteRecordingView = nil
+            self.noteDictation = nil
+            self.updateNotePlaceholder()
+        }
+
+        private var notePlaceholder: NSAttributedString?
+
+        // The example text is only a hint for an empty field: it goes away once the field is tapped or a voice note
+        // takes its place, so it never shows under the recording.
+        private func updateNotePlaceholder() {
+            guard let noteField = self.noteField else {
+                return
+            }
+            if noteField.isFirstResponder || self.noteRecordingView != nil {
+                noteField.attributedPlaceholder = nil
+            } else {
+                noteField.attributedPlaceholder = self.notePlaceholder
+            }
+        }
+
+        @objc private func endNoteEditingTap(_ recognizer: UITapGestureRecognizer) {
+            guard let noteField = self.noteField, noteField.isFirstResponder else {
+                return
+            }
+            if !noteField.bounds.contains(recognizer.location(in: noteField)) {
+                noteField.resignFirstResponder()
+            }
+        }
+
+        private func updateNoteMicButton(isRecording: Bool) {
+            guard let micButton = self.noteMicButton else {
+                return
+            }
+            micButton.setImage(UIImage(systemName: "mic", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18.0, weight: .regular)), for: .normal)
+            if let theme = self.environment?.theme {
+                micButton.tintColor = theme.actionSheet.controlAccentColor
+            }
+        }
+        
         func update(component: ChatScheduleTimeSheetContentComponent, availableSize: CGSize, state: EmptyComponentState, environment: Environment<EnvironmentType>, transition: ComponentTransition) -> CGSize {
             self.isUpdating = true
             defer {
@@ -297,28 +538,57 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
             contentHeight += 62.0
             
             if case let .replyReminder(_, notePlaceholder, note, _, _) = component.mode {
-                let noteField: UITextField
+                let noteField: ReplyReminderNoteField
                 if let current = self.noteField {
                     noteField = current
                 } else {
-                    noteField = UITextField()
-                    noteField.font = Font.regular(17.0)
-                    noteField.returnKeyType = .done
-                    noteField.clearButtonMode = .whileEditing
-                    noteField.layer.cornerRadius = 12.0
-                    noteField.leftView = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 14.0, height: 1.0))
-                    noteField.leftViewMode = .always
-                    noteField.delegate = self.noteFieldDelegate
+                    noteField = ReplyReminderNoteField()
                     noteField.text = note
+                    noteField.editingChanged = { [weak self] in
+                        self?.updateNotePlaceholder()
+                    }
+                    // Grows to show the whole note while it is edited; the sheet follows.
+                    noteField.heightChanged = { [weak self] in
+                        guard let self, !self.isUpdating else {
+                            return
+                        }
+                        self.state?.updated(transition: .spring(duration: 0.35))
+                    }
                     self.noteField = noteField
                     self.addSubview(noteField)
+                    
+                    // A tap anywhere else in the sheet (the calendar, the times) ends editing the note.
+                    let endEditingTap = UITapGestureRecognizer(target: self, action: #selector(self.endNoteEditingTap(_:)))
+                    endEditingTap.cancelsTouchesInView = false
+                    self.addGestureRecognizer(endEditingTap)
+                    
+                    // Microphone at the right of the note: dictate the note instead of typing it.
+                    let micButton = UIButton(type: .system)
+                    micButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+                    micButton.addTarget(self, action: #selector(self.noteMicPressed), for: .touchUpInside)
+                    let micContainer = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0))
+                    micContainer.addSubview(micButton)
+                    noteField.accessoryView = micContainer
+                    self.noteMicButton = micButton
+                    self.updateNoteMicButton(isRecording: false)
+                }
+                self.noteMicButton?.tintColor = environment.theme.actionSheet.controlAccentColor
+                if let recordingView = self.noteRecordingView {
+                    transition.setFrame(view: recordingView, frame: CGRect(origin: CGPoint(x: 24.0, y: contentHeight - 8.0), size: CGSize(width: availableSize.width - 48.0, height: 44.0)))
+                }
+                let noteHeight = noteField.preferredHeight(width: availableSize.width - 48.0)
+                if let noteVoice = component.noteVoice, !self.didStartNoteVoice {
+                    self.didStartNoteVoice = true
+                    noteField.frame = CGRect(origin: CGPoint(x: 24.0, y: contentHeight - 8.0), size: CGSize(width: availableSize.width - 48.0, height: noteHeight))
+                    self.startNoteVoice(noteVoice)
                 }
                 noteField.textColor = environment.theme.actionSheet.inputTextColor
                 noteField.tintColor = environment.theme.actionSheet.controlAccentColor
                 noteField.backgroundColor = environment.theme.actionSheet.inputBackgroundColor
-                noteField.attributedPlaceholder = NSAttributedString(string: notePlaceholder, font: Font.regular(17.0), textColor: environment.theme.actionSheet.inputPlaceholderColor)
-                transition.setFrame(view: noteField, frame: CGRect(origin: CGPoint(x: 24.0, y: contentHeight - 8.0), size: CGSize(width: availableSize.width - 48.0, height: 44.0)))
-                contentHeight += 48.0
+                self.notePlaceholder = NSAttributedString(string: notePlaceholder, font: Font.regular(17.0), textColor: environment.theme.actionSheet.inputPlaceholderColor)
+                self.updateNotePlaceholder()
+                transition.setFrame(view: noteField, frame: CGRect(origin: CGPoint(x: 24.0, y: contentHeight - 8.0), size: CGSize(width: availableSize.width - 48.0, height: noteHeight)))
+                contentHeight += noteHeight + 4.0
             }
             
             var added = false
@@ -477,8 +747,6 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                 contentHeight += 8.0
             } else if case .poll = component.mode {
                 contentHeight += 8.0
-            } else if case .replyReminder = component.mode {
-                contentHeight += 8.0
             } else {
                 transition.setFrame(layer: self.bottomSeparator, frame: CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: CGSize(width: availableSize.width - sideInset * 2.0, height: UIScreenPixel)))
                 self.bottomSeparator.backgroundColor = environment.theme.list.itemBlocksSeparatorColor.cgColor
@@ -620,10 +888,20 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                         guard let self, let component = self.component, let controller = self.environment?.controller() as? ChatScheduleTimeScreen else {
                             return
                         }
+                        // Still recording: whatever was recognized so far goes into the note.
+                        if let dictation = self.noteDictation, dictation.isRunning {
+                            if let text = dictation.currentText {
+                                self.noteField?.text = String(text.prefix(500))
+                            }
+                            dictation.cancel()
+                        }
                         var note: String?
                         if let text = self.noteField?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
                             note = text
                         }
+                        // Collapse first: it snapshots the sheet before the completion changes the screen underneath.
+                        let collapse = component.collapse
+                        collapse?()
                         controller.completion(
                             ChatScheduleTimeScreen.Result(
                                 time: Int32(self.date?.timeIntervalSince1970 ?? 0),
@@ -632,7 +910,9 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                                 note: note
                             )
                         )
-                        component.dismiss()
+                        if collapse == nil {
+                            component.dismiss()
+                        }
                     }
                 )),
                 environment: {},
@@ -866,7 +1146,12 @@ private final class ChatScheduleTimeSheetContentComponent: Component {
                                         return
                                     }
                                     self.isPickingRepeatPeriod = false
-                                    if component.context.isPremium {
+                                    var isReplyReminder = false
+                                    if case .replyReminder = component.mode {
+                                        isReplyReminder = true
+                                    }
+                                    // Personal reminders are local: repeating them needs no Premium.
+                                    if component.context.isPremium || isReplyReminder {
                                         self.repeatPeriod = value
                                     } else {
                                         var text = strings.ScheduleMessage_PremiumRequired_Text
@@ -1038,6 +1323,9 @@ private final class ChatScheduleTimeScreenComponent: Component {
     let suggestedTime: Int32?
     let minimalTime: Int32?
     let silentPosting: Bool
+    let morphSource: ChatScheduleTimeMorphAnchor?
+    let morphTarget: (() -> ChatScheduleTimeMorphAnchor?)?
+    let noteVoice: ChatScheduleTimeNoteVoice?
     
     init(
         context: AccountContext,
@@ -1046,7 +1334,10 @@ private final class ChatScheduleTimeScreenComponent: Component {
         currentRepeatPeriod: Int32?,
         suggestedTime: Int32?,
         minimalTime: Int32?,
-        silentPosting: Bool
+        silentPosting: Bool,
+        morphSource: ChatScheduleTimeMorphAnchor?,
+        morphTarget: (() -> ChatScheduleTimeMorphAnchor?)?,
+        noteVoice: ChatScheduleTimeNoteVoice?
     ) {
         self.context = context
         self.mode = mode
@@ -1055,6 +1346,9 @@ private final class ChatScheduleTimeScreenComponent: Component {
         self.suggestedTime = suggestedTime
         self.minimalTime = minimalTime
         self.silentPosting = silentPosting
+        self.morphSource = morphSource
+        self.morphTarget = morphTarget
+        self.noteVoice = noteVoice
     }
     
     static func ==(lhs: ChatScheduleTimeScreenComponent, rhs: ChatScheduleTimeScreenComponent) -> Bool {
@@ -1120,6 +1414,18 @@ private final class ChatScheduleTimeScreenComponent: Component {
                     })
                 }
             )
+            var collapse: (() -> Void)?
+            if let morphTarget = component.morphTarget {
+                collapse = { [weak self] in
+                    self?.collapse(into: morphTarget)
+                }
+            }
+            var customAnimateIn: ((SheetComponent<EnvironmentType>.View) -> Void)?
+            if let morphSource = component.morphSource {
+                customAnimateIn = { [weak self] sheetView in
+                    self?.expand(from: morphSource, sheetView: sheetView)
+                }
+            }
             let _ = self.sheet.update(
                 transition: transition,
                 component: AnyComponent(SheetComponent(
@@ -1141,13 +1447,16 @@ private final class ChatScheduleTimeScreenComponent: Component {
                                     controller.dismiss(completion: nil)
                                 }
                             })
-                        }
+                        },
+                        collapse: collapse,
+                        noteVoice: component.noteVoice
                     )),
                     style: .glass,
                     backgroundColor: .color(environment.theme.actionSheet.opaqueItemBackgroundColor),
                     followContentSizeChanges: true,
                     externalState: self.sheetExternalState,
-                    animateOut: self.sheetAnimateOut
+                    animateOut: self.sheetAnimateOut,
+                    customAnimateIn: customAnimateIn
                 )),
                 environment: {
                     environment
@@ -1184,6 +1493,83 @@ private final class ChatScheduleTimeScreenComponent: Component {
             
             return availableSize
         }
+        
+        private var sheetColor: UIColor {
+            return self.environment?.theme.actionSheet.opaqueItemBackgroundColor ?? .white
+        }
+        
+        // The sheet grows out of the element it edits (the reminder line), instead of sliding up.
+        private func expand(from source: ChatScheduleTimeMorphAnchor, sheetView: SheetComponent<EnvironmentType>.View) {
+            guard let window = self.window else {
+                return
+            }
+            let cardFrame = sheetView.cardFrame(in: window)
+            let cardView = sheetView.cardView
+            cardView.alpha = 0.0
+            
+            let morphView = ChatScheduleTimeMorphView(
+                startFrame: source.frame,
+                startCornerRadius: source.cornerRadius,
+                startColor: source.color,
+                snapshotView: nil,
+                snapshotFrame: CGRect(),
+                fadesSnapshot: false,
+                fallbackTarget: cardFrame,
+                target: { [weak self] in
+                    guard let self else {
+                        return nil
+                    }
+                    return ChatScheduleTimeMorphAnchor(frame: cardFrame, cornerRadius: 38.0, color: self.sheetColor, hiddenView: nil, land: nil)
+                },
+                completion: {
+                    UIView.animate(withDuration: 0.16, animations: {
+                        cardView.alpha = 1.0
+                    })
+                }
+            )
+            window.addSubview(morphView)
+            if let hiddenView = source.hiddenView {
+                hiddenView.alpha = 0.0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: {
+                    UIView.animate(withDuration: 0.2, animations: {
+                        hiddenView.alpha = 1.0
+                    })
+                })
+            }
+            morphView.start()
+        }
+        
+        // Closes the sheet by folding it into a reminder icon that flies off to the chat the reminder is for.
+        private func collapse(into target: @escaping () -> ChatScheduleTimeMorphAnchor?) {
+            guard let window = self.window, let sheetView = self.sheet.view as? SheetComponent<EnvironmentType>.View else {
+                self.sheetAnimateOut.invoke(Action { [weak self] _ in
+                    self?.environment?.controller()?.dismiss(completion: nil)
+                })
+                return
+            }
+            let cardFrame = sheetView.cardFrame(in: window)
+            let cardView = sheetView.cardView
+            let cardViewFrame = cardView.convert(cardView.bounds, to: window)
+            let snapshotView = cardView.snapshotView(afterScreenUpdates: false)
+            cardView.alpha = 0.0
+            self.endEditing(true)
+            
+            let morphView = ChatScheduleTimeFlyAwayView(
+                startFrame: cardFrame,
+                startCornerRadius: 38.0,
+                startColor: self.sheetColor,
+                accentColor: self.environment?.theme.list.itemAccentColor ?? UIColor(rgb: 0x007aff),
+                snapshotView: snapshotView,
+                snapshotFrame: cardViewFrame.offsetBy(dx: -cardFrame.minX, dy: -cardFrame.minY),
+                target: target
+            )
+            window.addSubview(morphView)
+            morphView.start()
+            
+            self.sheetAnimateOut.invoke(Action { [weak self] _ in
+                self?.environment?.controller()?.dismiss(completion: nil)
+            })
+        }
     }
     
     func makeView() -> View {
@@ -1192,6 +1578,24 @@ private final class ChatScheduleTimeScreenComponent: Component {
     
     func update(view: View, availableSize: CGSize, state: EmptyComponentState, environment: Environment<ViewControllerComponentContainer.Environment>, transition: ComponentTransition) -> CGSize {
         return view.update(component: self, availableSize: availableSize, state: state, environment: environment, transition: transition)
+    }
+}
+
+// A voice message that becomes the reminder note: it flies from the chat into the note field and turns into text.
+public struct ChatScheduleTimeNoteVoice {
+    public let text: Signal<String?, NoError>
+    public let levels: [CGFloat]
+    // A snapshot of the voice message, already shown in the window where it was; it flies into the note field.
+    public let flyingView: UIView?
+    // Instead of a snapshot: the point in the window (e.g. the microphone) the voice starts from, already as a
+    // glowing ball, so it flies straight into the note field.
+    public let orbOrigin: CGPoint?
+
+    public init(text: Signal<String?, NoError>, levels: [CGFloat], flyingView: UIView?, orbOrigin: CGPoint? = nil) {
+        self.text = text
+        self.levels = levels
+        self.flyingView = flyingView
+        self.orbOrigin = orbOrigin
     }
 }
 
@@ -1232,6 +1636,9 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
         minimalTime: Int32? = nil,
         silentPosting: Bool = false,
         isDark: Bool,
+        morphSource: ChatScheduleTimeMorphAnchor? = nil,
+        morphTarget: (() -> ChatScheduleTimeMorphAnchor?)? = nil,
+        noteVoice: ChatScheduleTimeNoteVoice? = nil,
         completion: @escaping (Result) -> Void
     ) {
         self.completion = completion
@@ -1243,7 +1650,10 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
             currentRepeatPeriod: currentRepeatPeriod,
             suggestedTime: suggestedTime,
             minimalTime: minimalTime,
-            silentPosting: silentPosting
+            silentPosting: silentPosting,
+            morphSource: morphSource,
+            morphTarget: morphTarget,
+            noteVoice: noteVoice
         ), navigationBarAppearance: .none, theme: isDark ? .dark : .default)
         
         self.statusBar.statusBarStyle = .Ignore
@@ -1268,6 +1678,17 @@ public class ChatScheduleTimeScreen: ViewControllerComponentContainer {
         super.viewDidAppear(animated)
         
         self.view.disablesInteractiveModalDismiss = true
+    }
+    
+    // Called once the sheet is gone, saved or not.
+    public var didDismiss: (() -> Void)?
+    
+    override public func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        
+        let didDismiss = self.didDismiss
+        self.didDismiss = nil
+        didDismiss?()
     }
 }
 
@@ -1937,14 +2358,3 @@ private final class TimeMenuComponent: Component {
     }
 }
 
-private final class ReplyReminderNoteFieldDelegate: NSObject, UITextFieldDelegate {
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        textField.resignFirstResponder()
-        return true
-    }
-    
-    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
-        let current = (textField.text ?? "") as NSString
-        return current.replacingCharacters(in: range, with: string).count <= 120
-    }
-}

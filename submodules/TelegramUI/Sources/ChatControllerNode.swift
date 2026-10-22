@@ -5350,7 +5350,7 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
                     break
                 case .quickReplyMessageInput:
                     break
-                case .welcomeMessages:
+                case .welcomeMessages, .replyReminders:
                     break
                 case .businessLinkSetup:
                     postEmptyMessages = true

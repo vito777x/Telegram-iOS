@@ -268,6 +268,11 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
     
     private var accessoryItemButtons: [(ChatTextInputAccessoryItem, AccessoryItemIconButton)] = []
     
+    // The button of an accessory item, e.g. to show a menu from it.
+    public func accessoryButtonView(key: ChatTextInputAccessoryItem.Key) -> UIView? {
+        return self.accessoryItemButtons.first(where: { $0.0.key == key })?.1
+    }
+    
     private var isUpdating: Bool = false
     private var validLayout: (CGFloat, CGFloat, CGFloat, CGFloat, UIEdgeInsets, CGFloat, CGFloat, LayoutMetrics, Bool, Bool, DeviceMetrics)?
     private var leftMenuInset: CGFloat = 0.0
@@ -1721,7 +1726,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                 break
             case .quickReplyMessageInput, .welcomeMessages:
                 break
-            case .businessLinkSetup:
+            case .businessLinkSetup, .replyReminders:
                 displayMediaButton = false
             }
         }
@@ -2142,6 +2147,8 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                         }
                     case .welcomeMessages:
                         placeholder = interfaceState.strings.Chat_Placeholder_WelcomeMessage
+                    case let .replyReminders(presentation):
+                        placeholder = presentation.placeholder
                     case .businessLinkSetup:
                         placeholder = interfaceState.strings.Chat_Placeholder_BusinessLinkPreset
                     }
@@ -2171,7 +2178,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                     switch customChatContents.kind {
                     case .hashTagSearch:
                         break
-                    case .quickReplyMessageInput, .welcomeMessages:
+                    case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                         break
                     case .businessLinkSetup:
                         sendButtonHasApplyIcon = true
@@ -2201,6 +2208,8 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                     } else {
                         if isScheduledMessages {
                             self.sendActionButtons.sendButton.setImage(PresentationResourcesChat.chatInputPanelScheduleButtonImage(interfaceState.theme), for: [])
+                        } else if isReplyRemindersSubject(interfaceState) {
+                            self.sendActionButtons.sendButton.setImage(replyRemindersSendImage(interfaceState.theme, filled: true), for: [])
                         } else {
                             self.sendActionButtons.sendButton.setImage(PresentationResourcesChat.chatInputPanelSendIconImage(interfaceState.theme), for: [])
                         }
@@ -2472,6 +2481,12 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
         }
         
         self.mediaActionButtons.micButton.updateMode(mode: interfaceState.interfaceState.mediaRecordingMode, animated: transition.isAnimated)
+        // On the reminders screen a locked recording is confirmed with a checkmark: it becomes the note, not a message.
+        if case let .customChatContents(customChatContents) = interfaceState.subject, case .replyReminders = customChatContents.kind {
+            self.mediaActionButtons.micButton.confirmsOnLock = true
+        } else {
+            self.mediaActionButtons.micButton.confirmsOnLock = false
+        }
         
         // The layout below reserves the send slot and scales the send button in on exactly this condition.
         let sendButtonIsLaidOut = inputHasText || hasMediaDraft || hasForward || isEditingMedia
@@ -3689,6 +3704,11 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
             viewOnceIsVisible = true
             recordMoreIsVisible = true
         }
+        if isReplyRemindersSubject(interfaceState) {
+            // A recorded note on the reminders screen goes straight to the reminder sheet; there is nothing to add to it.
+            viewOnceIsVisible = false
+            recordMoreIsVisible = false
+        }
                 
         /*var clippingDelta: CGFloat = 0.0
         if case let .media(_, _, focused) = interfaceState.inputMode, focused {
@@ -4593,7 +4613,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                 switch customChatContents.kind {
                 case .hashTagSearch:
                     break
-                case .quickReplyMessageInput, .welcomeMessages:
+                case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                     break
                 case .businessLinkSetup:
                     keepSendButtonEnabled = true
@@ -4702,7 +4722,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                 switch customChatContents.kind {
                 case .hashTagSearch:
                     break
-                case .quickReplyMessageInput, .welcomeMessages:
+                case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                     break
                 case .businessLinkSetup:
                     hideMicButton = true
@@ -4846,7 +4866,7 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                 switch customChatContents.kind {
                 case .hashTagSearch:
                     break
-                case .quickReplyMessageInput, .welcomeMessages:
+                case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                     break
                 case .businessLinkSetup:
                     sendButtonHasApplyIcon = true
@@ -4860,6 +4880,8 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                 } else {
                     if case .scheduledMessages = interfaceState.subject {
                         self.sendActionButtons.sendButton.setImage(PresentationResourcesChat.chatInputPanelScheduleIconImage(interfaceState.theme), for: [])
+                    } else if isReplyRemindersSubject(interfaceState) {
+                        self.sendActionButtons.sendButton.setImage(replyRemindersSendImage(interfaceState.theme, filled: false), for: [])
                     } else {
                         self.sendActionButtons.sendButton.setImage(PresentationResourcesChat.chatInputPanelSendIconImage(interfaceState.theme), for: [])
                     }
@@ -5800,6 +5822,8 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
                     self.interfaceInteraction?.setupMessageAutoremoveTimeout()
                 case .scheduledMessages:
                     self.interfaceInteraction?.openScheduledMessages()
+                case .replyReminders:
+                    self.interfaceInteraction?.openReplyReminders()
                 case .gift:
                     self.interfaceInteraction?.openPremiumGift()
                 case .suggestPost:
@@ -5977,4 +6001,50 @@ public class ChatTextInputPanelNode: ChatInputPanelNode, ASEditableTextNodeDeleg
     public func makeAttachmentMenuTransition(accessoryPanelNode: ASDisplayNode?) -> AttachmentInputPanelTransition {
         return AttachmentInputPanelTransition(inputNode: self, accessoryPanelNode: accessoryPanelNode, menuButtonNode: self.menuButton, menuButtonBackgroundView: self.menuButtonBackgroundView, menuIconNode: self.menuButtonIconNode, menuTextNode: self.menuButtonTextNode, prepareForDismiss: { self.menuButtonIconNode.enqueueState(.app, animated: false) })
     }
+}
+
+private func isReplyRemindersSubject(_ interfaceState: ChatPresentationInterfaceState) -> Bool {
+    if case let .customChatContents(customChatContents) = interfaceState.subject, case .replyReminders = customChatContents.kind {
+        return true
+    }
+    return false
+}
+
+private var replyRemindersSendImageCache: [String: UIImage] = [:]
+
+// Send button of the reminders screen: a clipboard with a pencil instead of the arrow, like the clock on the scheduled
+// messages screen. `filled` also draws the button circle.
+private func replyRemindersSendImage(_ theme: PresentationTheme, filled: Bool) -> UIImage? {
+    let foregroundColor: UIColor
+    if !filled, [.day, .night].contains(theme.referenceTheme.baseTheme) && !theme.chat.message.outgoing.bubble.withWallpaper.hasSingleFillColor {
+        foregroundColor = .white
+    } else {
+        foregroundColor = theme.chat.inputPanel.actionControlForegroundColor
+    }
+    let key = "\(filled)_\(foregroundColor.argb)_\(theme.chat.inputPanel.actionControlFillColor.argb)"
+    if let cached = replyRemindersSendImageCache[key] {
+        return cached
+    }
+    var symbol: UIImage?
+    for name in ["pencil.and.list.clipboard", "list.clipboard", "note.text"] {
+        if let image = UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: 16.0, weight: .semibold)) {
+            symbol = image
+            break
+        }
+    }
+    guard let symbol else {
+        return nil
+    }
+    let size = CGSize(width: 33.0, height: 33.0)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = UIScreen.main.scale
+    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+        if filled {
+            context.cgContext.setFillColor(theme.chat.inputPanel.actionControlFillColor.cgColor)
+            context.cgContext.fillEllipse(in: CGRect(origin: CGPoint(), size: size))
+        }
+        symbol.withTintColor(foregroundColor, renderingMode: .alwaysOriginal).draw(in: CGRect(x: floor((size.width - symbol.size.width) / 2.0), y: floor((size.height - symbol.size.height) / 2.0), width: symbol.size.width, height: symbol.size.height))
+    }
+    replyRemindersSendImageCache[key] = image
+    return image
 }

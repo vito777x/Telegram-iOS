@@ -365,6 +365,11 @@ extension ChatControllerImpl {
                             if strongSelf.chatLocation.threadId == nil, let channel = strongSelf.presentationInterfaceState.renderedPeer?.peer as? TelegramChannel, channel.isMonoForum, let linkedMonoforumId = channel.linkedMonoforumId, let mainChannel = strongSelf.presentationInterfaceState.renderedPeer?.peers[linkedMonoforumId] as? TelegramChannel, mainChannel.hasPermission(.manageDirect) {
                                 shouldAnimateMessageTransition = false
                             }
+                            if case let .customChatContents(customChatContents) = strongSelf.presentationInterfaceState.subject, case .replyReminders = customChatContents.kind {
+                                // On the reminders screen the voice becomes a note, never a message: a transition into
+                                // the new message would wait for it forever, and the recording UI (its checkmark) with it.
+                                shouldAnimateMessageTransition = false
+                            }
                             
                             if shouldAnimateMessageTransition, let textInputPanelNode = strongSelf.chatDisplayNode.textInputPanelNode, let micButton = textInputPanelNode.micButton {
                                 usedCorrelationId = true

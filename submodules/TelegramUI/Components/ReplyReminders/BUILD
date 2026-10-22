@@ -14,6 +14,10 @@ swift_library(
         "//submodules/Display:Display",
         "//submodules/UndoUI:UndoUI",
         "//submodules/TelegramUI/Components/ChatScheduleTimeController",
+        "//submodules/Media/ConvertOpusToAAC",
+        "//submodules/OverlayStatusController",
+        "//submodules/PresentationDataUtils",
+        "//submodules/TelegramPresentationData",
     ],
     visibility = [
         "//visibility:public",

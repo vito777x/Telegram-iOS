@@ -449,7 +449,7 @@ func inputPanelForChatPresentationIntefaceState(_ chatPresentationInterfaceState
         switch customChatContents.kind {
         case .hashTagSearch:
             displayInputTextPanel = false
-        case .quickReplyMessageInput, .businessLinkSetup, .welcomeMessages:
+        case .quickReplyMessageInput, .businessLinkSetup, .welcomeMessages, .replyReminders:
             displayInputTextPanel = true
         }
         

@@ -152,6 +152,8 @@ public final class ChatPanelInterfaceInteraction {
     public let displaySlowmodeTooltip: (UIView, CGRect) -> Void
     public let displaySendMessageOptions: (ASDisplayNode, ContextGesture) -> Void
     public let openScheduledMessages: () -> Void
+    // Opens the chat's personal reminders; set by the chat screen.
+    public var openReplyReminders: () -> Void = {}
     public let displaySearchResultsTooltip: (ASDisplayNode, CGRect) -> Void
     public let unarchivePeer: () -> Void
     public let scrollToTop: () -> Void

@@ -10,6 +10,7 @@ public enum ChatTextInputAccessoryItem: Equatable {
         case silentPost
         case messageAutoremoveTimeout
         case scheduledMessages
+        case replyReminders
         case gift
         case suggestPost
     }
@@ -27,6 +28,8 @@ public enum ChatTextInputAccessoryItem: Equatable {
     case silentPost(Bool)
     case messageAutoremoveTimeout(Int32?)
     case scheduledMessages
+    // The chat has personal reminders: opens the reminders screen.
+    case replyReminders
     case gift
     case suggestPost
     
@@ -44,6 +47,8 @@ public enum ChatTextInputAccessoryItem: Equatable {
             return .messageAutoremoveTimeout
         case .scheduledMessages:
             return .scheduledMessages
+        case .replyReminders:
+            return .replyReminders
         case .gift:
             return .gift
         case .suggestPost:

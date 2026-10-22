@@ -1884,6 +1884,8 @@ extension ChatControllerImpl {
                         self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(link.title ?? strings.Business_Links_EditLinkTitle))], subtitle: linkUrl, isEnabled: false)
                     case .welcomeMessages:
                         self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(strings.WelcomeMessages_Title))], subtitle: nil, isEnabled: false)
+                    case let .replyReminders(presentation):
+                        self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(presentation.title))], subtitle: presentation.subtitle, isEnabled: false)
                     }
                 } else {
                     self.state.chatTitleContent = .custom(title: [ChatTitleContent.TitleTextItem(id: AnyHashable(0), content: .text(" "))], subtitle: nil, isEnabled: false)

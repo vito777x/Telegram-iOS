@@ -170,6 +170,8 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
                 }
             case .scheduledMessages:
                 return (PresentationResourcesChat.chatInputTextFieldScheduleImage(theme), nil, strings.VoiceOver_ScheduledMessages, 1.0, UIEdgeInsets())
+            case .replyReminders:
+                return (replyRemindersAccessoryImage(), nil, strings.baseLanguageCode.hasPrefix("ru") ? "Напоминания" : "Reminders", 1.0, UIEdgeInsets())
             case .gift:
                 return (PresentationResourcesChat.chatInputTextFieldGiftImage(theme), nil, strings.VoiceOver_GiftPremium, 1.0, UIEdgeInsets())
         }
@@ -177,7 +179,7 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
     
     private static func calculateWidth(item: ChatTextInputAccessoryItem, image: UIImage?, text: String?, strings: PresentationStrings) -> CGFloat {
         switch item {
-        case .input, .botInput, .silentPost, .commands, .scheduledMessages, .gift, .suggestPost:
+        case .input, .botInput, .silentPost, .commands, .scheduledMessages, .replyReminders, .gift, .suggestPost:
             return 32.0
         case let .messageAutoremoveTimeout(timeout):
             var imageWidth = (image?.size.width ?? 0.0) + CGFloat(8.0)
@@ -202,6 +204,8 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
             var imageFrame = CGRect(origin: CGPoint(x: floor((size.width - image.size.width) / 2.0), y: floor((size.height - image.size.height) / 2.0) - bottomInset), size: image.size)
             imageFrame.origin.y += insets.top
             if case .scheduledMessages = item {
+                imageFrame.origin.y += 1.0
+            } else if case .replyReminders = item {
                 imageFrame.origin.y += 1.0
             }
             self.iconImageView.frame = imageFrame
@@ -361,4 +365,15 @@ final class AccessoryItemIconButton: HighlightTrackingButton, GlassBackgroundVie
     var buttonWidth: CGFloat {
         return self.width
     }
+}
+
+// The reminders button: a clipboard with a pencil, so it is not mistaken for the scheduled messages clock.
+private func replyRemindersAccessoryImage() -> UIImage? {
+    let configuration = UIImage.SymbolConfiguration(pointSize: 19.0, weight: .regular)
+    for name in ["pencil.and.list.clipboard", "list.clipboard", "note.text"] {
+        if let image = UIImage(systemName: name, withConfiguration: configuration) {
+            return image.withRenderingMode(.alwaysTemplate)
+        }
+    }
+    return nil
 }

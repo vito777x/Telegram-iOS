@@ -254,6 +254,10 @@ private func mappedInsertEntries(context: AccountContext, chatLocation: ChatLoca
     var disableFloatingDateHeaders = false
     if case .customChatContents = chatLocation {
         disableFloatingDateHeaders = true
+        // The reminders screen groups its reminders by day, like scheduled messages.
+        if case let .customChatContents(contents) = associatedData.subject, case .replyReminders = contents.kind {
+            disableFloatingDateHeaders = false
+        }
     }
     
     return entries.map { entry -> ChatHistoryListViewInsertItem in
@@ -309,6 +313,10 @@ private func mappedUpdateEntries(context: AccountContext, chatLocation: ChatLoca
     var disableFloatingDateHeaders = false
     if case .customChatContents = chatLocation {
         disableFloatingDateHeaders = true
+        // The reminders screen groups its reminders by day, like scheduled messages.
+        if case let .customChatContents(contents) = associatedData.subject, case .replyReminders = contents.kind {
+            disableFloatingDateHeaders = false
+        }
     }
     
     return entries.map { entry -> ChatHistoryListViewUpdateItem in

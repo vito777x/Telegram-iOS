@@ -1335,11 +1335,31 @@ public enum ChatQuickReplyShortcutType {
     case away
 }
 
+// Texts of a chat's personal reminders screen; the screen itself lives in ReplyReminders.
+public struct ChatReplyRemindersPresentation: Equatable {
+    public let peerId: EnginePeer.Id
+    public let title: String
+    public let subtitle: String?
+    public let placeholder: String
+    public let emptyTitle: String
+    public let emptyText: String
+
+    public init(peerId: EnginePeer.Id, title: String, subtitle: String?, placeholder: String, emptyTitle: String, emptyText: String) {
+        self.peerId = peerId
+        self.title = title
+        self.subtitle = subtitle
+        self.placeholder = placeholder
+        self.emptyTitle = emptyTitle
+        self.emptyText = emptyText
+    }
+}
+
 public enum ChatCustomContentsKind: Equatable {
     case quickReplyMessageInput(shortcut: String, shortcutType: ChatQuickReplyShortcutType)
     case businessLinkSetup(link: TelegramBusinessChatLinks.Link)
     case hashTagSearch(publicPosts: Bool)
     case welcomeMessages
+    case replyReminders(ChatReplyRemindersPresentation)
 }
 
 public protocol ChatCustomContentsProtocol: AnyObject {

@@ -835,7 +835,7 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
         }
         if case let .customChatContents(contents) = item.associatedData.subject {
             switch contents.kind {
-            case .quickReplyMessageInput, .welcomeMessages:
+            case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                 return true
             case .businessLinkSetup, .hashTagSearch:
                 break

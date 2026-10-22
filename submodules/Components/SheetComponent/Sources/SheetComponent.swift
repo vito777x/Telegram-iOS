@@ -88,6 +88,8 @@ public final class SheetComponent<ChildEnvironmentType: Sendable & Equatable>: C
     public let onPan: () -> Void
     public let willDismiss: () -> Void
     public let didAppear: () -> Void
+    // Replaces the slide-up with the caller's own appearance animation (the card is laid out by then).
+    public let customAnimateIn: ((View) -> Void)?
     
     public init(
         content: AnyComponent<ChildEnvironmentType>,
@@ -103,7 +105,8 @@ public final class SheetComponent<ChildEnvironmentType: Sendable & Equatable>: C
         animateOut: ActionSlot<Action<()>>,
         didAppear: @escaping () -> Void = {},
         onPan: @escaping () -> Void = {},
-        willDismiss: @escaping () -> Void = {}
+        willDismiss: @escaping () -> Void = {},
+        customAnimateIn: ((View) -> Void)? = nil
     ) {
         self.content = content
         self.headerContent = headerContent
@@ -119,6 +122,7 @@ public final class SheetComponent<ChildEnvironmentType: Sendable & Equatable>: C
         self.onPan = onPan
         self.willDismiss = willDismiss
         self.didAppear = didAppear
+        self.customAnimateIn = customAnimateIn
     }
     
     public static func ==(lhs: SheetComponent, rhs: SheetComponent) -> Bool {
@@ -322,10 +326,25 @@ public final class SheetComponent<ChildEnvironmentType: Sendable & Equatable>: C
             return super.hitTest(point, with: event)
         }
         
+        // The sheet card (background and content), for morphing it into another element and back.
+        public var cardView: UIView {
+            return self.scrollView
+        }
+        
+        public func cardFrame(in view: UIView) -> CGRect {
+            return self.backgroundView.convert(self.backgroundView.bounds, to: view)
+        }
+        
         private func animateIn() {
             self.dimView.alpha = self.isDimHidden ? 0.0 : 1.0
             if !self.isDimHidden {
                 self.dimView.layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.3)
+            }
+            
+            if let customAnimateIn = self.component?.customAnimateIn {
+                customAnimateIn(self)
+                self.component?.didAppear()
+                return
             }
             
             let transition = ContainedViewLayoutTransition.animated(duration: 0.4, curve: .spring)

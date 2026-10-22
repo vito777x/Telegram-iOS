@@ -145,7 +145,7 @@ final class ChatRestrictedInputPanelNode: ChatInputPanelNode {
                 displayCount = 0
             case .quickReplyMessageInput:
                 displayCount = customChatContents.messageLimit ?? 20
-            case .businessLinkSetup:
+            case .businessLinkSetup, .replyReminders:
                 displayCount = 0
             case .welcomeMessages:
                 displayCount = customChatContents.messageLimit ?? 5

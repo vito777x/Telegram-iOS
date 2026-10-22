@@ -328,6 +328,9 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
                 if case let .customChatContents(contents) = item.associatedData.subject {
                     if case .hashTagSearch = contents.kind {
                         displayStatus = true
+                    } else if case .replyReminders = contents.kind {
+                        // Every reminder shows when it fires, like a message shows when it was sent.
+                        displayStatus = true
                     } else {
                         displayStatus = false
                     }
@@ -336,8 +339,13 @@ public class ChatMessageTextBubbleContentNode: ChatMessageBubbleContentNode {
                 } else if case let .messageOptions(_, _, info) = item.associatedData.subject, case let .link(link) = info, link.isCentered {
                     displayStatus = false
                 }
+                var isReplyReminder = false
+                if case let .customChatContents(contents) = item.associatedData.subject, case .replyReminders = contents.kind {
+                    isReplyReminder = true
+                }
                 if displayStatus {
-                    if incoming {
+                    if incoming || isReplyReminder {
+                        // A reminder only shows its time: nothing is delivered or read, so no checkmarks.
                         statusType = .BubbleIncoming
                     } else {
                         if message.flags.contains(.Failed) {

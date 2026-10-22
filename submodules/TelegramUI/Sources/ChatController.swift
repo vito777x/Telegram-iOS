@@ -110,6 +110,7 @@ import ChatMessageItemView
 import ChatMessageItemCommon
 import ChatMessageAnimatedStickerItemNode
 import ChatMessageBubbleItemNode
+import ChatMessageActionBubbleContentNode
 import ChatNavigationButton
 import WebsiteType
 import PeerInfoScreen
@@ -477,6 +478,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     var willAppear = false
     var didAppear = false
+    private var replyReminderAnchorDisposable: Disposable?
+    private var replyRemindersStateDisposable: Disposable?
     var enableAnimations = false
     var scheduledActivateInput: ChatControllerActivateInput?
     
@@ -729,6 +732,9 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                 break
             case .welcomeMessages:
                 break
+            case .replyReminders:
+                // Notes are dictated with the microphone only; no video messages here.
+                self.presentationInterfaceState = self.presentationInterfaceState.updatedInterfaceState({ $0.withUpdatedMediaRecordingMode(.audio) })
             }
         }
         
@@ -808,7 +814,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                 switch customChatContents.kind {
                 case .hashTagSearch:
                     return true
-                case .welcomeMessages:
+                case .welcomeMessages, .replyReminders:
                     return true
                 case let .quickReplyMessageInput(_, shortcutType):
                     if let historyView = strongSelf.chatDisplayNode.historyNode.originalHistoryView, historyView.entries.isEmpty {
@@ -1020,9 +1026,9 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                     }))
                     
                     return true
-                } else if let action = media as? TelegramMediaAction, case .customText = action.action, replyReminderForLocalMessage(context: self.context, messageId: message.id) != nil, let peer = message.peers[message.id.peerId] {
-                    // Tapping the "reminder set" line opens the reminder for editing.
-                    presentReplyReminderEditor(context: self.context, peerId: message.id.peerId, peer: EnginePeer(peer), push: { [weak self] controller in
+                } else if let action = media as? TelegramMediaAction, case .customText = action.action, let reminder = replyReminderForLocalMessage(context: self.context, messageId: message.id), let peer = message.peers[message.id.peerId] {
+                    // Tapping a "reminder set" line opens that reminder for editing.
+                    presentReplyReminderEditor(context: self.context, peerId: message.id.peerId, peer: EnginePeer(peer), reminder: reminder, push: { [weak self] controller in
                         self?.push(controller)
                     }, present: { [weak self] controller in
                         self?.present(controller, in: .current)
@@ -3840,7 +3846,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                 }
                 if case let .customChatContents(customChatContents) = strongSelf.presentationInterfaceState.subject {
                     switch customChatContents.kind {
-                    case .quickReplyMessageInput, .welcomeMessages:
+                    case .quickReplyMessageInput, .welcomeMessages, .replyReminders:
                         return .none
                     case .businessLinkSetup, .hashTagSearch:
                         break
@@ -7085,6 +7091,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         let _ = ChatControllerCount.modify { value in
             return value - 1
         }
+        self.replyReminderAnchorDisposable?.dispose()
+        self.replyRemindersStateDisposable?.dispose()
 
         self.richTextCheckboxCompletionObserver?.dispose()
         for (_, timer) in self.richTextCheckboxDebounceTimers {
@@ -7673,6 +7681,12 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     
     override public func loadDisplayNode() {
         self.loadDisplayNodeImpl()
+        if case let .peer(peerId) = self.chatLocation {
+            // Put the line of a reminder that fired into the chat already here: a preview from the chat list
+            // never gets viewWillAppear, and it should show the reminder like the opened chat does.
+            let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
+            materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
+        }
         self.galleryPresentationContext.view = self.view
         self.galleryPresentationContext.controllersUpdated = { [weak self] _ in
             guard let self else {
@@ -7682,12 +7696,175 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         }
     }
     
+    // The scheduled button of the input field, which also opens the chat's reminders.
+    private func replyReminderInputButtonAnchor() -> ReplyReminderAnchor? {
+        guard self.isNodeLoaded, let window = self.view.window, let buttonView = self.chatDisplayNode.textInputPanelNode?.accessoryButtonView(key: .replyReminders) ?? self.chatDisplayNode.textInputPanelNode?.accessoryButtonView(key: .scheduledMessages) else {
+            return nil
+        }
+        let frame = buttonView.convert(buttonView.bounds, to: window)
+        return ReplyReminderAnchor(
+            frame: frame,
+            cornerRadius: frame.height / 2.0,
+            color: self.presentationData.theme.chat.inputPanel.inputControlColor.withMultipliedAlpha(0.25),
+            sourceView: self.view,
+            hiddenView: nil,
+            land: { [weak buttonView] in
+                if let buttonView {
+                    replyReminderPlayLandAnimation(layer: buttonView.layer)
+                }
+            }
+        )
+    }
+    
+    // A reminder's bubble on the reminders screen.
+    private func replyReminderBubbleAnchor(reminderId: String?) -> ReplyReminderAnchor? {
+        guard self.isNodeLoaded, let window = self.view.window, let reminderId else {
+            return nil
+        }
+        let displayId = replyReminderDisplayMessageId(reminderId: reminderId)
+        var result: ReplyReminderAnchor?
+        self.chatDisplayNode.historyNode.forEachVisibleItemNode { node in
+            guard result == nil, let itemNode = node as? ChatMessageBubbleItemNode, let item = itemNode.item, item.message.id.id == displayId else {
+                return
+            }
+            let frame = itemNode.view.convert(itemNode.contentFrame(), to: window)
+            result = ReplyReminderAnchor(
+                frame: frame,
+                cornerRadius: min(frame.height / 2.0, 17.0),
+                color: self.presentationData.theme.chat.message.outgoing.bubble.withoutWallpaper.fill.first ?? .white,
+                sourceView: self.view,
+                hiddenView: itemNode.view,
+                land: { [weak itemNode] in
+                    if let itemNode {
+                        replyReminderPlayLandAnimation(layer: itemNode.layer)
+                    }
+                }
+            )
+        }
+        return result
+    }
+    
+    // The line of the given reminder ("Reminder set for …" or "Reminder at …"); without an id, or once a fired
+    // reminder is cleared, the newest local reminder line on screen.
+    private func replyReminderLineAnchor(reminderId: String?) -> ReplyReminderAnchor? {
+        guard self.isNodeLoaded, let window = self.view.window else {
+            return nil
+        }
+        var targetLocalId: Int32?
+        if let reminderId, let reminder = ReplyReminderStore.shared.reminder(id: reminderId) {
+            if let firedLocalId = reminder.firedLocalMessageId, firedLocalId != 0 {
+                targetLocalId = firedLocalId
+            } else if !reminder.isDue {
+                // A pending reminder has no line in the chat: it lives behind the scheduled button of the input field.
+                return self.replyReminderInputButtonAnchor()
+            } else {
+                // Its "Reminder at …" line is written asynchronously; until then there is nothing to point at.
+                return nil
+            }
+        }
+        var best: (index: MessageIndex, contentNode: ChatMessageActionBubbleContentNode, itemNode: ChatMessageBubbleItemNode)?
+        self.chatDisplayNode.historyNode.forEachVisibleItemNode { node in
+            guard let itemNode = node as? ChatMessageBubbleItemNode, let item = itemNode.item else {
+                return
+            }
+            let message = item.message
+            guard message.id.namespace == Namespaces.Message.Local, message.author?.id == self.context.account.peerId, let action = message.media.first(where: { $0 is TelegramMediaAction }) as? TelegramMediaAction, case .customText = action.action else {
+                return
+            }
+            if let targetLocalId, message.id.id != targetLocalId {
+                return
+            }
+            for case let contentNode as ChatMessageActionBubbleContentNode in itemNode.contentNodes {
+                if best == nil || message.index > best!.index {
+                    best = (message.index, contentNode, itemNode)
+                }
+            }
+        }
+        guard let best, let backgroundNode = best.contentNode.backgroundNode else {
+            return nil
+        }
+        let frame = backgroundNode.view.convert(backgroundNode.bounds, to: window)
+        let contentNode = best.contentNode
+        return ReplyReminderAnchor(
+            frame: frame,
+            cornerRadius: min(frame.height / 2.0, 16.0),
+            color: serviceMessageColorComponents(theme: self.presentationData.theme, wallpaper: self.presentationInterfaceState.chatWallpaper).fill,
+            sourceView: self.view,
+            hiddenView: contentNode.view,
+            land: { [weak contentNode] in
+                if let contentNode {
+                    replyReminderPlayLandAnimation(layer: contentNode.layer)
+                }
+            }
+        )
+    }
+    
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         
         if case let .peer(peerId) = self.chatLocation {
             let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
             materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
+            removeReplyReminderSetLines(context: self.context, peerId: peerId)
+            
+            if self.replyReminderAnchorDisposable == nil {
+                // The reminder line in this chat: the reminder sheet grows out of it and collapses into it,
+                // and the bell from the Dynamic Island lands on it when the reminder fires here.
+                self.replyReminderAnchorDisposable = ReplyReminderAnchors.shared.register(peerId: peerId, kind: .chatLine, onFire: { [weak self] in
+                    guard let self, self.view.window != nil else {
+                        return
+                    }
+                    let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
+                    materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
+                    ReplyReminderStore.shared.clearDue(peerId: peerId, accountPeerId: self.context.account.peerId)
+                }, provider: { [weak self] reminderId in
+                    return self?.replyReminderLineAnchor(reminderId: reminderId)
+                })
+            }
+            if self.replyRemindersStateDisposable == nil {
+                // The reminders button next to the stickers button comes and goes with the chat's reminders.
+                let peerIdValue = peerId.toInt64()
+                self.replyRemindersStateDisposable = (ReplyReminderStore.shared.reminders(accountPeerId: self.context.account.peerId)
+                |> map { reminders -> Bool in
+                    return reminders.contains(where: { $0.peerId == peerIdValue && $0.isPending })
+                }
+                |> distinctUntilChanged
+                |> deliverOnMainQueue).startStrict(next: { [weak self] _ in
+                    guard let self, self.isNodeLoaded else {
+                        return
+                    }
+                    self.updateChatPresentationInterfaceState(animated: true, interactive: false, { $0 })
+                })
+            }
+        } else if self.replyReminderAnchorDisposable == nil, case let .customChatContents(customChatContents) = self.presentationInterfaceState.subject, case let .replyReminders(presentation) = customChatContents.kind {
+            // On the reminders screen the reminder sheet collapses into the reminder's bubble.
+            self.replyReminderAnchorDisposable = ReplyReminderAnchors.shared.register(peerId: presentation.peerId, kind: .chatLine, provider: { [weak self] reminderId in
+                return self?.replyReminderBubbleAnchor(reminderId: reminderId)
+            })
+            if self.replyRemindersStateDisposable == nil {
+                // The note typed here went into the reminder: once a new reminder shows up, the input is emptied.
+                let peerIdValue = presentation.peerId.toInt64()
+                var knownIds: Set<String>?
+                self.replyRemindersStateDisposable = (ReplyReminderStore.shared.reminders(accountPeerId: self.context.account.peerId)
+                |> map { reminders -> Set<String> in
+                    return Set(reminders.filter { $0.peerId == peerIdValue }.map(\.id))
+                }
+                |> distinctUntilChanged
+                |> deliverOnMainQueue).startStrict(next: { [weak self] ids in
+                    defer {
+                        knownIds = ids
+                    }
+                    guard let self, self.isNodeLoaded, let knownIds, !ids.subtracting(knownIds).isEmpty else {
+                        return
+                    }
+                    self.chatDisplayNode.textInputPanelNode?.text = ""
+                    self.updateChatPresentationInterfaceState(animated: true, interactive: false, { state in
+                        return state.updatedInterfaceState { interfaceState in
+                            return interfaceState.withUpdatedComposeInputState(ChatTextInputState(inputText: NSAttributedString()))
+                        }
+                    })
+                })
+            }
         }
                 
         if self.willAppear {
@@ -10659,6 +10836,44 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
             self.updateSlowmodeStatusTimerValue = nil
             self.updateSlowmodeStatusDisposable.set(nil)
         }
+    }
+    
+    // The input field's scheduled button also leads to personal reminders: it opens whichever the chat has,
+    // and when it has both it asks which one.
+    func openScheduledMessagesOrReplyReminders() {
+        guard case let .peer(peerId) = self.chatLocation, self.presentationInterfaceState.subject == nil, !ReplyReminderStore.shared.reminders(peerId: peerId, accountPeerId: self.context.account.peerId).isEmpty, let peer = self.presentationInterfaceState.renderedPeer?.peer else {
+            self.openScheduledMessages()
+            return
+        }
+        let openReminders: () -> Void = { [weak self] in
+            guard let self, let navigationController = self.effectiveNavigationController else {
+                return
+            }
+            openReplyRemindersScreen(context: self.context, peerId: peerId, peer: EnginePeer(peer), navigationController: navigationController)
+        }
+        guard self.presentationInterfaceState.hasScheduledMessages, let sourceView = self.chatDisplayNode.textInputPanelNode?.accessoryButtonView(key: .scheduledMessages) else {
+            self.chatDisplayNode.dismissInput()
+            openReminders()
+            return
+        }
+        let strings = ReplyReminderStrings(languageCode: self.presentationData.strings.baseLanguageCode)
+        let items: [ContextMenuItem] = [
+            .action(ContextMenuActionItem(text: strings.remindersTitle, icon: { theme in
+                return replyReminderMenuIcon(color: theme.contextMenu.primaryColor)
+            }, action: { _, f in
+                f(.default)
+                openReminders()
+            })),
+            .action(ContextMenuActionItem(text: self.presentationData.strings.ScheduledMessages_Title, icon: { theme in
+                return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Schedule"), color: theme.contextMenu.primaryColor)
+            }, action: { [weak self] _, f in
+                f(.default)
+                self?.openScheduledMessages()
+            }))
+        ]
+        self.chatDisplayNode.dismissInput()
+        let contextController = makeContextController(presentationData: self.presentationData, source: .reference(ChatControllerContextReferenceContentSource(controller: self, sourceView: sourceView, insets: .zero, actionsOnTop: true)), items: .single(ContextController.Items(content: .list(items))), gesture: nil)
+        self.presentInGlobalOverlay(contextController)
     }
     
     func openScheduledMessages(force: Bool = false, completion: @escaping (ChatControllerImpl) -> Void = { _ in }) {

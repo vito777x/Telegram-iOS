@@ -10,6 +10,7 @@ import SwiftSignalKit
 import TextFormat
 import ChatContextQuery
 import ChatTextInputPanelNode
+import ReplyReminders
 
 func serviceTasksForChatPresentationIntefaceState(context: AccountContext, chatPresentationInterfaceState: ChatPresentationInterfaceState, updateState: @escaping ((ChatPresentationInterfaceState) -> ChatPresentationInterfaceState) -> Void) -> [AnyHashable: () -> Disposable] {
     // Read the STRUCTURAL model, not the derived `inputText`: the flat projection drops whole blocks
@@ -55,7 +56,7 @@ func inputContextQueriesForChatPresentationIntefaceState(_ chatPresentationInter
             break
         case .welcomeMessages:
             break
-        case .businessLinkSetup:
+        case .businessLinkSetup, .replyReminders:
             return []
         }
     }
@@ -207,8 +208,19 @@ func inputTextPanelStateForChatPresentationInterfaceState(_ chatPresentationInte
                     }
                 }
                    
-                if isTextEmpty && chatPresentationInterfaceState.hasScheduledMessages && !hasForward {
-                    accessoryItems.append(.scheduledMessages)
+                // One button for scheduled messages and personal reminders: it opens whichever the chat has, or offers both.
+                var hasReplyReminders = false
+                if chatPresentationInterfaceState.subject == nil, case let .peer(peerId) = chatPresentationInterfaceState.chatLocation {
+                    hasReplyReminders = ReplyReminderStore.shared.hasPendingReminders(peerId: peerId, accountPeerId: chatPresentationInterfaceState.accountPeerId)
+                }
+                if isTextEmpty && !hasForward {
+                    if chatPresentationInterfaceState.hasScheduledMessages {
+                        // The clock, as usual; with reminders too it offers both.
+                        accessoryItems.append(.scheduledMessages)
+                    } else if hasReplyReminders {
+                        // Only reminders: the reminder icon.
+                        accessoryItems.append(.replyReminders)
+                    }
                 }
                     
                 var stickersEnabled = true
@@ -244,7 +256,7 @@ func inputTextPanelStateForChatPresentationInterfaceState(_ chatPresentationInte
                         break
                     case .welcomeMessages:
                         break
-                    case .businessLinkSetup:
+                    case .businessLinkSetup, .replyReminders:
                         stickersEnabled = false
                     }
                 }
