@@ -6,18 +6,18 @@ import TelegramCore
 // The reminder fired while the app is open: the reminder icon drops out of the Dynamic Island, folds into a paper
 // plane and flies to the chat along a dotted trail, where it turns into the unread dot
 // (or lands on the reminder line when the chat is open). `title` and `text` are only read out by VoiceOver.
-public func presentReplyReminderIslandAlert(window: UIWindow, peerId: EnginePeer.Id, reminderId: String?, title: String, text: String, open: @escaping () -> Void) {
-    let view = ReplyReminderIslandAlertView(window: window, peerId: peerId, reminderId: reminderId, title: title, text: text, open: open)
+public func presentReplyReminderIslandAlert(window: UIWindow, peerId: EnginePeer.Id, reminderId: String?, title: String, text: String, accentColor: UIColor, open: @escaping () -> Void, landed: @escaping () -> Void) {
+    let view = ReplyReminderIslandAlertView(window: window, peerId: peerId, reminderId: reminderId, title: title, text: text, accentColor: accentColor, open: open, landed: landed)
     window.addSubview(view)
     view.animateIn()
 }
 
-private let replyReminderAccentColor = UIColor(rgb: 0x2a9ef1)
-
 private final class ReplyReminderIslandAlertView: UIView {
     private let peerId: EnginePeer.Id
     private let reminderId: String?
+    private let accentColor: UIColor
     private let open: () -> Void
+    private let landed: () -> Void
 
     private let islandFrame: CGRect
     private let hoverCenter: CGPoint
@@ -31,12 +31,15 @@ private final class ReplyReminderIslandAlertView: UIView {
 
     private var isDismissing = false
     private var didStartFlight = false
+    private var isHoldingBadge = true
 
     private static let size: CGFloat = 46.0
 
-    init(window: UIWindow, peerId: EnginePeer.Id, reminderId: String?, title: String, text: String, open: @escaping () -> Void) {
+    init(window: UIWindow, peerId: EnginePeer.Id, reminderId: String?, title: String, text: String, accentColor: UIColor, open: @escaping () -> Void, landed: @escaping () -> Void) {
+        self.landed = landed
         self.peerId = peerId
         self.reminderId = reminderId
+        self.accentColor = accentColor
         self.open = open
 
         let bounds = window.bounds
@@ -57,7 +60,7 @@ private final class ReplyReminderIslandAlertView: UIView {
         self.accessibilityTraits = .button
 
         self.circleView.frame = self.bounds
-        self.circleView.backgroundColor = replyReminderAccentColor
+        self.circleView.backgroundColor = self.accentColor
         self.circleView.layer.cornerRadius = size / 2.0
         self.addSubview(self.circleView)
 
@@ -74,12 +77,37 @@ private final class ReplyReminderIslandAlertView: UIView {
         self.planeWhiteView.image = replyReminderPlaneImage(color: .white)
         self.planeWhiteView.frame = self.bounds
         self.planeHolder.addSubview(self.planeWhiteView)
-        self.planeColorView.image = replyReminderPlaneImage(color: replyReminderAccentColor)
+        self.planeColorView.image = replyReminderPlaneImage(color: self.accentColor)
         self.planeColorView.frame = self.bounds
         self.planeColorView.alpha = 0.0
         self.planeHolder.addSubview(self.planeColorView)
 
         self.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(self.tapGesture)))
+
+        // The chat's unread dot shows up only when the plane lands on it, not as soon as the reminder fires.
+        ReplyReminderAnchors.shared.holdBadge(peerId: peerId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            self?.releaseBadge()
+        }
+    }
+
+    deinit {
+        if self.isHoldingBadge {
+            let peerId = self.peerId
+            let landed = self.landed
+            DispatchQueue.main.async {
+                landed()
+                ReplyReminderAnchors.shared.releaseBadge(peerId: peerId)
+            }
+        }
+    }
+
+    private func releaseBadge() {
+        if self.isHoldingBadge {
+            self.isHoldingBadge = false
+            self.landed()
+            ReplyReminderAnchors.shared.releaseBadge(peerId: self.peerId)
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -95,7 +123,7 @@ private final class ReplyReminderIslandAlertView: UIView {
             self.transform = .identity
         })
         UIView.animate(withDuration: 0.3, delay: 0.08, options: [.allowUserInteraction], animations: {
-            self.circleView.backgroundColor = replyReminderAccentColor
+            self.circleView.backgroundColor = self.accentColor
         })
         UINotificationFeedbackGenerator().notificationOccurred(.success)
 
@@ -153,6 +181,7 @@ private final class ReplyReminderIslandAlertView: UIView {
             return
         }
         self.isDismissing = true
+        self.releaseBadge()
         self.open()
         UIView.animate(withDuration: 0.2, animations: {
             self.alpha = 0.0
@@ -201,7 +230,7 @@ private final class ReplyReminderIslandAlertView: UIView {
         trail.frame = window.bounds
         trail.path = path.cgPath
         trail.fillColor = UIColor.clear.cgColor
-        trail.strokeColor = replyReminderAccentColor.withAlphaComponent(0.55).cgColor
+        trail.strokeColor = self.accentColor.withAlphaComponent(0.55).cgColor
         trail.lineWidth = 2.5
         trail.lineCap = .round
         trail.lineDashPattern = [0.0, 7.0]
@@ -253,6 +282,9 @@ private final class ReplyReminderIslandAlertView: UIView {
                 anchor?.hiddenView?.isHidden = false
                 return
             }
+            if anchor?.hiddenView == nil {
+                self.releaseBadge()
+            }
             self.land(at: end, anchor: anchor, in: window)
         }
         self.layer.add(position, forKey: "position")
@@ -274,7 +306,7 @@ private final class ReplyReminderIslandAlertView: UIView {
 
         let isBadge = anchor.hiddenView != nil
         let diameter: CGFloat = isBadge ? anchor.frame.height : 10.0
-        let color = isBadge ? anchor.color : replyReminderAccentColor
+        let color = isBadge ? anchor.color : self.accentColor
 
         let dot = UIView(frame: CGRect(x: point.x - diameter / 2.0, y: point.y - diameter / 2.0, width: diameter, height: diameter))
         if isBadge {
@@ -305,7 +337,8 @@ private final class ReplyReminderIslandAlertView: UIView {
             ripple.removeFromSuperview()
         })
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+            self.releaseBadge()
             anchor.hiddenView?.isHidden = false
             anchor.land?()
             UIView.animate(withDuration: isBadge ? 0.12 : 0.25, animations: {
@@ -331,5 +364,194 @@ private func replyReminderPlaneImage(color: UIColor) -> UIImage? {
         // The symbol points up and to the right.
         cg.rotate(by: CGFloat.pi / 4.0)
         plane.draw(in: CGRect(x: -plane.size.width / 2.0, y: -plane.size.height / 2.0, width: plane.size.width, height: plane.size.height))
+    }
+}
+
+// A reminder fired before its chat was opened: once the chat is on screen, the reminder icon pops
+// up where its "Reminder at …" line is and stretches into that gray line, which only you see.
+// The line (`anchor.hiddenView`) is expected to be hidden with alpha 0; it is faded in at the end.
+public func presentReplyReminderLineMorph(window: UIWindow, anchor: ReplyReminderAnchor, accentColor: UIColor) {
+    let diameter: CGFloat = 36.0
+    let center = CGPoint(x: anchor.frame.midX, y: anchor.frame.midY)
+
+    let capsule = UIView(frame: CGRect(x: center.x - diameter / 2.0, y: center.y - diameter / 2.0, width: diameter, height: diameter))
+    capsule.backgroundColor = accentColor
+    capsule.layer.cornerRadius = diameter / 2.0
+    capsule.isUserInteractionEnabled = false
+    window.addSubview(capsule)
+
+    let iconView = UIImageView(image: replyReminderSymbol(pointSize: 16.0, weight: .semibold)?.withRenderingMode(.alwaysTemplate))
+    iconView.tintColor = .white
+    iconView.contentMode = .center
+    iconView.frame = capsule.bounds
+    // Stays centered while the capsule stretches.
+    iconView.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
+    capsule.addSubview(iconView)
+
+    let ripple = UIView(frame: capsule.frame)
+    ripple.layer.cornerRadius = diameter / 2.0
+    ripple.layer.borderWidth = 2.0
+    ripple.layer.borderColor = accentColor.cgColor
+    ripple.isUserInteractionEnabled = false
+    window.insertSubview(ripple, belowSubview: capsule)
+
+    // Pops in with a ripple, like the dot the paper plane left in the chat list.
+    let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+    pop.values = [0.1, 1.25, 0.92, 1.04, 1.0] as [NSNumber]
+    pop.keyTimes = [0.0, 0.35, 0.62, 0.84, 1.0] as [NSNumber]
+    pop.duration = 0.5
+    capsule.layer.add(pop, forKey: "pop")
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    UIView.animate(withDuration: 0.6, delay: 0.05, options: [.curveEaseOut], animations: {
+        ripple.transform = CGAffineTransform(scaleX: 2.4, y: 2.4)
+        ripple.alpha = 0.0
+    }, completion: { _ in
+        ripple.removeFromSuperview()
+    })
+
+    // The same jot as in the island.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        let scribble = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        scribble.values = [0.0, -0.22, 0.18, -0.12, 0.06, 0.0] as [NSNumber]
+        scribble.duration = 0.5
+        scribble.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        iconView.layer.add(scribble, forKey: "scribble")
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        replyReminderStretchIntoLine(capsule: capsule, iconView: iconView, anchor: anchor)
+    }
+}
+
+// Stretches the blue circle into the line, taking its shape and gray color; the icon folds away.
+private func replyReminderStretchIntoLine(capsule: UIView, iconView: UIView, anchor: ReplyReminderAnchor) {
+    UIView.animate(withDuration: 0.2, delay: 0.0, options: [.curveEaseIn], animations: {
+        iconView.transform = CGAffineTransform(scaleX: 0.4, y: 0.4)
+        iconView.alpha = 0.0
+    })
+    UIView.animate(withDuration: 0.5, delay: 0.05, usingSpringWithDamping: 0.78, initialSpringVelocity: 0.0, options: [], animations: {
+        capsule.frame = anchor.frame
+        capsule.layer.cornerRadius = anchor.cornerRadius
+        capsule.backgroundColor = anchor.color
+    })
+    // The real line with its text shows through as the capsule settles.
+    UIView.animate(withDuration: 0.3, delay: 0.35, options: [.curveEaseInOut], animations: {
+        anchor.hiddenView?.alpha = 1.0
+        capsule.alpha = 0.0
+    }, completion: { _ in
+        capsule.removeFromSuperview()
+        anchor.hiddenView?.alpha = 1.0
+        anchor.land?()
+    })
+}
+
+// A reminder fired while its chat is open: the reminders button next to the stickers button grows a little, turns
+// blue, then flies to where the reminder's line appears and stretches into it. Created as soon as the reminder fires;
+// `land(on:)` is called once the line is on screen.
+public final class ReplyReminderInputIconFlight {
+    private static let diameter: CGFloat = 36.0
+
+    private let capsule: UIView
+    private let iconView: UIImageView
+    private let grayIconView: UIImageView
+    private var isLaunched = false
+    private var isFinished = false
+    private var pendingAnchor: ReplyReminderAnchor?
+
+    public init(window: UIWindow, buttonView: UIView, iconColor: UIColor, accentColor: UIColor) {
+        let frame = buttonView.convert(buttonView.bounds, to: window)
+        let diameter = ReplyReminderInputIconFlight.diameter
+
+        self.capsule = UIView(frame: CGRect(x: frame.midX - diameter / 2.0, y: frame.midY - diameter / 2.0, width: diameter, height: diameter))
+        self.capsule.backgroundColor = accentColor.withAlphaComponent(0.0)
+        self.capsule.layer.cornerRadius = diameter / 2.0
+        self.capsule.isUserInteractionEnabled = false
+        window.addSubview(self.capsule)
+
+        let symbol = replyReminderSymbol(pointSize: 16.0, weight: .semibold)?.withRenderingMode(.alwaysTemplate)
+        self.grayIconView = UIImageView(image: symbol)
+        self.grayIconView.tintColor = iconColor
+        self.iconView = UIImageView(image: symbol)
+        self.iconView.tintColor = .white
+        self.iconView.alpha = 0.0
+        for view in [self.grayIconView, self.iconView] {
+            view.contentMode = .center
+            view.frame = self.capsule.bounds
+            view.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin, .flexibleTopMargin, .flexibleBottomMargin]
+            self.capsule.addSubview(view)
+        }
+
+        // Starts the size of the button's icon and fills with blue in place.
+        self.capsule.transform = CGAffineTransform(scaleX: 0.75, y: 0.75)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIView.animate(withDuration: 0.25, delay: 0.0, options: [.curveEaseInOut], animations: {
+            self.capsule.backgroundColor = accentColor
+            self.iconView.alpha = 1.0
+            self.grayIconView.alpha = 0.0
+        })
+        // Holds itself until it has flown: the chat lets go of it as soon as it has handed over the line.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
+            self.isLaunched = true
+            if let anchor = self.pendingAnchor {
+                self.fly(to: anchor)
+            }
+        }
+        // Never left hanging over the screen, whatever happens to the chat meanwhile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [self] in
+            self.cancel()
+        }
+    }
+
+    public func land(on anchor: ReplyReminderAnchor) {
+        if self.isLaunched {
+            self.fly(to: anchor)
+        } else {
+            self.pendingAnchor = anchor
+        }
+    }
+
+    // The line never showed up on screen: the circle just fades.
+    public func cancel() {
+        guard !self.isFinished else {
+            return
+        }
+        self.isFinished = true
+        let capsule = self.capsule
+        UIView.animate(withDuration: 0.2, animations: {
+            capsule.alpha = 0.0
+            capsule.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+        }, completion: { _ in
+            capsule.removeFromSuperview()
+        })
+    }
+
+    private func fly(to anchor: ReplyReminderAnchor) {
+        guard !self.isFinished else {
+            return
+        }
+        self.isFinished = true
+        let capsule = self.capsule
+        let iconView = self.iconView
+
+        // Up and over to the line along an arc, back to its normal size on the way.
+        let start = capsule.center
+        let end = CGPoint(x: anchor.frame.midX, y: anchor.frame.midY)
+        let path = UIBezierPath()
+        path.move(to: start)
+        path.addQuadCurve(to: end, controlPoint: CGPoint(x: (start.x + end.x) / 2.0 + (start.x > end.x ? 40.0 : -40.0), y: min(start.y, end.y) - 60.0))
+        let duration: Double = 0.55
+        let position = CAKeyframeAnimation(keyPath: "position")
+        position.path = path.cgPath
+        position.duration = duration
+        position.timingFunction = CAMediaTimingFunction(controlPoints: 0.35, 0.0, 0.25, 1.0)
+        capsule.center = end
+        capsule.layer.add(position, forKey: "flight")
+        UIView.animate(withDuration: duration, delay: 0.0, options: [.curveEaseInOut], animations: {
+            capsule.transform = .identity
+        })
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            replyReminderStretchIntoLine(capsule: capsule, iconView: iconView, anchor: anchor)
+        }
     }
 }

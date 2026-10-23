@@ -3201,9 +3201,12 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     let content = notification.request.content
                     let reminderId = content.userInfo["replyReminderId"] as? String
                     let reminder = reminderId.flatMap { ReplyReminderStore.shared.reminder(id: $0) }
-                    // The line goes into the chat right away, so a preview of the chat already shows it.
-                    materializeDueReplyReminder(context: context, peerId: peerId, strings: ReplyReminderStrings(languageCode: context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode))
+                    // An open chat goes first: the icon of its reminders button flies to the line it writes.
                     ReplyReminderAnchors.shared.fire(peerId: peerId)
+                    // The line goes into the chat (a chat opened or previewed meanwhile writes it itself).
+                    let materialize: () -> Void = {
+                        materializeDueReplyReminder(context: context, peerId: peerId, strings: ReplyReminderStrings(languageCode: context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode))
+                    }
                     let reminderStrings = ReplyReminderStrings(languageCode: context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode)
                     let text = reminder.flatMap { reminderStrings.notificationText(subject: $0.subject) } ?? content.body
                     let open: () -> Void = {
@@ -3215,9 +3218,14 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     if let topController = self.contextValue?.rootController.topViewController as? ChatControllerImpl, case let .peer(topPeerId) = topController.chatLocation, topPeerId == peerId, topController.presentationInterfaceState.subject == nil {
                         isChatOpen = true
                     }
-                    if isChatOpen || ReplyReminderAnchors.shared.landingAnchor(peerId: peerId, reminderId: reminderId) != nil {
-                        presentReplyReminderIslandAlert(window: window, peerId: peerId, reminderId: reminderId, title: reminder?.peerTitle ?? content.title, text: text, open: open)
+                    if isChatOpen {
+                        // The chat shows it itself (see above).
+                        materialize()
+                    } else if ReplyReminderAnchors.shared.landingAnchor(peerId: peerId, reminderId: reminderId) != nil {
+                        // Only once the paper plane has landed: until then the chat list row stays as it was.
+                        presentReplyReminderIslandAlert(window: window, peerId: peerId, reminderId: reminderId, title: reminder?.peerTitle ?? content.title, text: text, accentColor: context.sharedContext.currentPresentationData.with { $0 }.theme.actionSheet.controlAccentColor, open: open, landed: materialize)
                     } else {
+                        materialize()
                         self.presentReplyReminderBanner(context: context, peerId: peerId, text: text, open: open)
                     }
                     completionHandler([.list, .sound])

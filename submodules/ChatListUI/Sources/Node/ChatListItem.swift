@@ -1471,6 +1471,7 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
     private let replyReminderBadgeAnchorDisposable = MetaDisposable()
     private var replyReminderPeerId: EnginePeer.Id?
     private var replyReminderIgnoreNextUpdate = false
+    private var replyReminderWasHeld = false
     
     private var isHighlighted: Bool = false
     private var nextHasActiveRevealControls: Bool = false
@@ -1868,7 +1869,7 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
         // Reminders are not part of the chat list entries, so the row re-lays itself out when one of its chat
         // fires (it then shows the note and an unread dot) and when opening the chat clears it.
         let peerIdValue = peerId.toInt64()
-        let signal: Signal<String, NoError> = ReplyReminderStore.shared.reminders(accountPeerId: item.context.account.peerId)
+        let dueSignal: Signal<String, NoError> = ReplyReminderStore.shared.reminders(accountPeerId: item.context.account.peerId)
         |> map { reminders -> [ReplyReminder] in
             return reminders.filter { $0.peerId == peerIdValue }
         }
@@ -1886,13 +1887,21 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                 return EmptyDisposable
             } |> delay(delayValue, queue: Queue.mainQueue()))
         }
+        // Also when the paper plane lands: the reminder takes the place of the last message only then.
+        let signal: Signal<String, NoError> = combineLatest(dueSignal, ReplyReminderAnchors.shared.badgeHeld(peerId: peerId))
+        |> map { state, isHeld -> String in
+            return isHeld ? state + "|held" : state
+        }
         |> distinctUntilChanged
         |> deliverOnMainQueue
         self.replyReminderIgnoreNextUpdate = true
-        self.replyReminderDueDisposable.set(signal.startStrict(next: { [weak self] _ in
+        self.replyReminderDueDisposable.set(signal.startStrict(next: { [weak self] state in
             guard let self else {
                 return
             }
+            let isHeld = state.hasSuffix("|held")
+            let didLand = self.replyReminderWasHeld && !isHeld
+            self.replyReminderWasHeld = isHeld
             if self.replyReminderIgnoreNextUpdate {
                 self.replyReminderIgnoreNextUpdate = false
                 return
@@ -1900,9 +1909,48 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
             guard let (item, first, last, firstWithHeader, nextIsPinned, nextHasActiveRevealControls, params, _) = self.layoutParams else {
                 return
             }
+            let oldTextView = didLand ? self.textNode.textNode.view.snapshotView(afterScreenUpdates: false) : nil
             let (_, apply) = self.asyncLayout()(item, params, first, last, firstWithHeader, nextIsPinned, nextHasActiveRevealControls)
             apply(false, false)
+            if didLand {
+                self.animateReplyReminderTextLanding(oldTextView: oldTextView)
+            }
         }))
+    }
+    
+    // The paper plane has landed and become the unread dot: the last message is pulled into the dot, and the reminder
+    // comes back out of it into its place, like out of a black hole.
+    private func animateReplyReminderTextLanding(oldTextView: UIView?) {
+        let textView = self.textNode.textNode.view
+        guard let container = textView.superview, !self.badgeNode.bounds.isEmpty else {
+            return
+        }
+        let hole = self.badgeNode.view.convert(CGPoint(x: self.badgeNode.bounds.midX, y: self.badgeNode.bounds.midY), to: container)
+        let intoHole: (CGRect) -> CGAffineTransform = { frame in
+            return CGAffineTransform(translationX: hole.x - frame.midX, y: hole.y - frame.midY).scaledBy(x: 0.05, y: 0.05)
+        }
+
+        if let oldTextView {
+            oldTextView.frame = textView.frame
+            container.insertSubview(oldTextView, belowSubview: textView)
+            UIView.animate(withDuration: 0.22, delay: 0.0, options: [.curveEaseIn], animations: {
+                oldTextView.transform = intoHole(oldTextView.frame)
+                oldTextView.alpha = 0.0
+            }, completion: { _ in
+                oldTextView.removeFromSuperview()
+            })
+        }
+
+        let textAlpha = textView.alpha
+        textView.transform = intoHole(textView.frame)
+        textView.alpha = 0.0
+        UIView.animate(withDuration: 0.45, delay: 0.12, usingSpringWithDamping: 0.82, initialSpringVelocity: 0.0, options: [], animations: {
+            textView.transform = .identity
+        })
+        UIView.animate(withDuration: 0.2, delay: 0.12, options: [.curveEaseOut], animations: {
+            textView.alpha = textAlpha
+        })
+        replyReminderPlayLandAnimation(layer: self.badgeNode.layer)
     }
     
     // The unread dot: the paper plane of a reminder that fired turns into it.
@@ -3463,11 +3511,13 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
             if case let .peer(peerData) = item.content, peerData.threadInfo == nil {
                 dueReplyReminder = ReplyReminderStore.shared.reminders(peerId: peerData.peer.peerId, accountPeerId: item.context.account.peerId).filter { $0.isDue }.last
             }
-            if let dueReplyReminder {
+            // While the paper plane of a reminder that just fired is on its way, the row keeps its last message.
+            let isReplyReminderHeld = dueReplyReminder.flatMap { ReplyReminderAnchors.shared.isBadgeHeld(peerId: $0.enginePeerId) } ?? false
+            if let dueReplyReminder, !isReplyReminderHeld {
                 let reminderStrings = ReplyReminderStrings(languageCode: item.presentationData.strings.baseLanguageCode)
                 let reminderText = NSMutableAttributedString(string: reminderStrings.chatListFiredTitle(time: dueReplyReminder.time), font: textFont, textColor: item.presentationData.theme.list.itemAccentColor)
                 if let subject = dueReplyReminder.subject {
-                    reminderText.append(NSAttributedString(string: ": " + subject.replacingOccurrences(of: "\n", with: " "), font: textFont, textColor: theme.messageTextColor))
+                    reminderText.append(NSAttributedString(string: ": " + subject.replacingOccurrences(of: "\n", with: " "), font: textFont, textColor: item.presentationData.theme.list.itemAccentColor))
                 }
                 textAttributedString = reminderText
                 authorAttributedString = nil
@@ -3553,7 +3603,7 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                 }
             }
             
-            if dueReplyReminder != nil {
+            if dueReplyReminder != nil && !isReplyReminderHeld {
                 // The delivery checkmark belongs to the last message, which the reminder has replaced.
                 statusState = .none
             }
@@ -4786,6 +4836,10 @@ public class ChatListItemNode: ItemListRevealOptionsItemNode {
                         
                         transition.updateFrame(node: strongSelf.badgeNode, frame: badgeFrame)
                         nextBadgeX -= badgeLayout.width + 6.0
+                        // A reminder's paper plane is on its way: the dot appears when it lands.
+                        if let replyReminderPeerId = strongSelf.replyReminderPeerId {
+                            strongSelf.badgeNode.isHidden = ReplyReminderAnchors.shared.isBadgeHeld(peerId: replyReminderPeerId)
+                        }
                         
                         if item.useCommunityViewLayout {
                             strongSelf.badgeNode.layer.rasterizationScale = UIScreenScale

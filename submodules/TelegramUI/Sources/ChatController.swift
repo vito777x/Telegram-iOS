@@ -480,6 +480,11 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
     var didAppear = false
     private var replyReminderAnchorDisposable: Disposable?
     private var replyRemindersStateDisposable: Disposable?
+    // Reminders that fired before the chat was opened: their lines stay hidden until the reminder icon turns into
+    // them on screen. The message id is the one the reminder was set from, if any; the flight is set when the reminder
+    // fires while the chat is open (the icon flies from the reminders button).
+    private var replyReminderLineMorphs: [(time: Int32, messageId: EngineMessage.Id?, flight: ReplyReminderInputIconFlight?)] = []
+    private var replyReminderLineMorphStartTime: Double = 0.0
     var enableAnimations = false
     var scheduledActivateInput: ChatControllerActivateInput?
     
@@ -7799,10 +7804,121 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
         )
     }
     
+    // The "Reminder at …" line of a reminder that fired at the given time (set from the given message, if any).
+    private func replyReminderLineContentNode(time: Int32, messageId: EngineMessage.Id?) -> ChatMessageActionBubbleContentNode? {
+        var result: ChatMessageActionBubbleContentNode?
+        self.chatDisplayNode.historyNode.forEachVisibleItemNode { node in
+            guard result == nil, let itemNode = node as? ChatMessageBubbleItemNode, let item = itemNode.item else {
+                return
+            }
+            let message = item.message
+            guard message.id.namespace == Namespaces.Message.Local, message.timestamp == time, message.author?.id == self.context.account.peerId, let action = message.media.first(where: { $0 is TelegramMediaAction }) as? TelegramMediaAction, case .customText = action.action, message.attributes.first(where: { $0 is ReplyMessageAttribute }).flatMap({ ($0 as? ReplyMessageAttribute)?.messageId }) == messageId else {
+                return
+            }
+            for case let contentNode as ChatMessageActionBubbleContentNode in itemNode.contentNodes {
+                result = contentNode
+            }
+        }
+        return result
+    }
+    
+    // A reminder fired while the chat is open: a copy of the reminders button's icon flies to each new line.
+    private func flyReplyRemindersFromInputButton(peerId: EnginePeer.Id) {
+        let due = ReplyReminderStore.shared.reminders(peerId: peerId, accountPeerId: self.context.account.peerId).filter { $0.isDue && $0.firedLocalMessageId == nil }
+        guard !due.isEmpty else {
+            return
+        }
+        var flight: ReplyReminderInputIconFlight?
+        if let window = self.view.window, let buttonView = self.chatDisplayNode.textInputPanelNode?.accessoryButtonView(key: .replyReminders) {
+            flight = ReplyReminderInputIconFlight(window: window, buttonView: buttonView, iconColor: self.presentationData.theme.chat.inputPanel.inputControlColor, accentColor: self.presentationData.theme.actionSheet.controlAccentColor)
+        }
+        let wasEmpty = self.replyReminderLineMorphs.isEmpty
+        for (index, reminder) in due.enumerated() {
+            // One icon flies; any other reminder that fired at the same moment gets the plain morph.
+            self.replyReminderLineMorphs.append((reminder.time, reminder.linkedMessageId, index == 0 ? flight : nil))
+        }
+        if wasEmpty {
+            self.replyReminderLineMorphStartTime = CACurrentMediaTime()
+            self.updateReplyReminderLineMorphs()
+        }
+    }
+    
+    private func startReplyReminderLineMorphs(peerId: EnginePeer.Id) {
+        guard self.replyReminderLineMorphs.isEmpty, self.presentationInterfaceState.subject == nil else {
+            return
+        }
+        self.replyReminderLineMorphs = ReplyReminderStore.shared.reminders(peerId: peerId, accountPeerId: self.context.account.peerId).filter(\.isDue).map { reminder in
+            return (reminder.time, reminder.linkedMessageId, nil)
+        }
+        if !self.replyReminderLineMorphs.isEmpty {
+            self.replyReminderLineMorphStartTime = CACurrentMediaTime()
+            self.updateReplyReminderLineMorphs()
+        }
+    }
+    
+    // Runs every frame until each line has shown up (it is written asynchronously) and the chat has finished
+    // appearing; a line that is not on screen by then is simply shown.
+    private func updateReplyReminderLineMorphs() {
+        guard self.isNodeLoaded, !self.replyReminderLineMorphs.isEmpty else {
+            return
+        }
+        let timedOut = CACurrentMediaTime() - self.replyReminderLineMorphStartTime > 3.0
+        var remaining: [(time: Int32, messageId: EngineMessage.Id?, flight: ReplyReminderInputIconFlight?)] = []
+        for morph in self.replyReminderLineMorphs {
+            guard let contentNode = self.replyReminderLineContentNode(time: morph.time, messageId: morph.messageId) else {
+                if !timedOut {
+                    remaining.append(morph)
+                } else {
+                    morph.flight?.cancel()
+                }
+                continue
+            }
+            contentNode.view.alpha = 0.0
+            if self.didAppear, let window = self.view.window, let backgroundNode = contentNode.backgroundNode {
+                let frame = backgroundNode.view.convert(backgroundNode.bounds, to: window)
+                let anchor = ReplyReminderAnchor(
+                    frame: frame,
+                    cornerRadius: min(frame.height / 2.0, 16.0),
+                    color: serviceMessageColorComponents(theme: self.presentationData.theme, wallpaper: self.presentationInterfaceState.chatWallpaper).fill,
+                    sourceView: self.view,
+                    hiddenView: contentNode.view,
+                    land: { [weak contentNode] in
+                        if let contentNode {
+                            replyReminderPlayLandAnimation(layer: contentNode.layer)
+                        }
+                    }
+                )
+                if anchor.isVisible {
+                    if let flight = morph.flight {
+                        flight.land(on: anchor)
+                    } else {
+                        presentReplyReminderLineMorph(window: window, anchor: anchor, accentColor: self.presentationData.theme.actionSheet.controlAccentColor)
+                    }
+                } else {
+                    contentNode.view.alpha = 1.0
+                    morph.flight?.cancel()
+                }
+            } else if timedOut {
+                contentNode.view.alpha = 1.0
+                morph.flight?.cancel()
+            } else {
+                remaining.append(morph)
+            }
+        }
+        self.replyReminderLineMorphs = remaining
+        if !remaining.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
+                self?.updateReplyReminderLineMorphs()
+            }
+        }
+    }
+    
     override public func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         
         if case let .peer(peerId) = self.chatLocation {
+            // Before the due reminders are cleared when the chat appears.
+            self.startReplyReminderLineMorphs(peerId: peerId)
             let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
             materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
             removeReplyReminderSetLines(context: self.context, peerId: peerId)
@@ -7814,9 +7930,17 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
                     guard let self, self.view.window != nil else {
                         return
                     }
+                    self.flyReplyRemindersFromInputButton(peerId: peerId)
                     let languageCode = self.context.sharedContext.currentPresentationData.with { $0 }.strings.baseLanguageCode
                     materializeDueReplyReminder(context: self.context, peerId: peerId, strings: ReplyReminderStrings(languageCode: languageCode))
                     ReplyReminderStore.shared.clearDue(peerId: peerId, accountPeerId: self.context.account.peerId)
+                    if let buttonView = self.chatDisplayNode.textInputPanelNode?.accessoryButtonView(key: .replyReminders), !ReplyReminderStore.shared.hasPendingReminders(peerId: peerId, accountPeerId: self.context.account.peerId) {
+                        // The last reminder of the chat flew off: the button is gone at once, not after the panel updates.
+                        buttonView.alpha = 0.0
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak buttonView] in
+                            buttonView?.alpha = 1.0
+                        }
+                    }
                 }, provider: { [weak self] reminderId in
                     return self?.replyReminderLineAnchor(reminderId: reminderId)
                 })

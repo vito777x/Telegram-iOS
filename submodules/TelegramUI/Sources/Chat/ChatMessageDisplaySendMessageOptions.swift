@@ -325,8 +325,8 @@ func chatMessageDisplaySendMessageOptions(selfController: ChatControllerImpl, no
     })
 }
 
-// "Remind Me" in the send button menu: instead of sending, the typed text (or a recorded voice message, recognized
-// into text) becomes the note of a new personal reminder; it leaves the input field once the reminder is saved.
+// "Remind Me" in the send button menu: instead of sending, the typed text becomes the note of a new personal reminder;
+// it leaves the input field once the reminder is saved. A recorded voice message (or any media) gets no such item.
 private func replyReminderSendMenuAction(selfController: ChatControllerImpl, peer: EnginePeer, hasMedia: Bool) -> ChatSendMessageContextScreenExtraAction? {
     guard selfController.presentationInterfaceState.subject == nil, case let .peer(peerId) = selfController.chatLocation, peerId != selfController.context.account.peerId else {
         return nil
@@ -342,41 +342,6 @@ private func replyReminderSendMenuAction(selfController: ChatControllerImpl, pee
             selfController?.push(controller)
         }, present: { [weak selfController] controller in
             selfController?.present(controller, in: .current)
-        })
-    }
-
-    if let mediaDraftState = selfController.presentationInterfaceState.interfaceState.mediaDraftState, case let .audio(audio) = mediaDraftState {
-        // A recorded voice message: it flies from the input panel into the note field and turns into its text there;
-        // the recording is dropped once the reminder is saved.
-        return ChatSendMessageContextScreenExtraAction(title: strings.remindForMe, icon: icon, action: { [weak selfController] previewSnapshot in
-            guard let selfController else {
-                previewSnapshot?.removeFromSuperview()
-                return
-            }
-            // The voice bubble of the send menu collapses into a point and reappears in the note field.
-            let flyingView: UIView? = previewSnapshot
-            var panelView: UIView?
-            if let inputPanelView = selfController.chatDisplayNode.inputPanelNode?.view {
-                inputPanelView.alpha = 0.0
-                panelView = inputPanelView
-            }
-            let noteVoice = ChatScheduleTimeNoteVoice(
-                text: replyReminderTranscribeVoice(context: selfController.context, resource: audio.resource),
-                levels: replyReminderWaveformLevels(audio.waveform),
-                flyingView: flyingView
-            )
-            presentReplyReminderEditor(context: selfController.context, peerId: peerId, peer: peer, noteVoice: noteVoice, created: { [weak selfController] _ in
-                selfController?.interfaceInteraction?.deleteRecordedMedia()
-            }, dismissed: { [weak panelView] in
-                flyingView?.removeFromSuperview()
-                UIView.animate(withDuration: 0.2, animations: {
-                    panelView?.alpha = 1.0
-                })
-            }, push: { [weak selfController] controller in
-                selfController?.push(controller)
-            }, present: { [weak selfController] controller in
-                selfController?.present(controller, in: .current)
-            })
         })
     }
 
@@ -403,17 +368,4 @@ private func replyReminderSendMenuAction(selfController: ChatControllerImpl, pee
             })
         })
     })
-}
-
-// The voice message's waveform as levels 0...1 for the note field.
-private func replyReminderWaveformLevels(_ waveform: AudioWaveform) -> [CGFloat] {
-    let count = waveform.samples.count / 2
-    if count == 0 {
-        return []
-    }
-    let peak = max(1, CGFloat(waveform.peak))
-    return waveform.samples.withUnsafeBytes { bytes -> [CGFloat] in
-        let samples = bytes.bindMemory(to: Int16.self)
-        return (0 ..< count).map { min(1.0, CGFloat(samples[$0]) / peak) }
-    }
 }

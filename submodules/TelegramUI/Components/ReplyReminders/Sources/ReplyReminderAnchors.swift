@@ -119,6 +119,44 @@ public final class ReplyReminderAnchors {
         return self.anchors(peerId: peerId, reminderId: reminderId).first
     }
 
+    // Chats whose unread dot waits for the paper plane: the chat list row keeps it hidden until the plane lands.
+    private var heldBadgePeerIds: [EnginePeer.Id: Int] = [:]
+    private let heldBadgesPromise = ValuePromise<Set<EnginePeer.Id>>(Set())
+
+    // The row re-lays itself out with this: while held, it keeps its last message instead of the reminder.
+    public func badgeHeld(peerId: EnginePeer.Id) -> Signal<Bool, NoError> {
+        return self.heldBadgesPromise.get()
+        |> map { $0.contains(peerId) }
+        |> distinctUntilChanged
+    }
+
+    public func isBadgeHeld(peerId: EnginePeer.Id) -> Bool {
+        return self.heldBadgePeerIds[peerId] != nil
+    }
+
+    public func holdBadge(peerId: EnginePeer.Id) {
+        self.heldBadgePeerIds[peerId, default: 0] += 1
+        self.heldBadgesPromise.set(Set(self.heldBadgePeerIds.keys))
+        for entry in self.entries where entry.peerId == peerId && entry.kind == .chatListBadge {
+            entry.provider(nil)?.hiddenView?.isHidden = true
+        }
+    }
+
+    public func releaseBadge(peerId: EnginePeer.Id) {
+        guard let count = self.heldBadgePeerIds[peerId] else {
+            return
+        }
+        if count > 1 {
+            self.heldBadgePeerIds[peerId] = count - 1
+            return
+        }
+        self.heldBadgePeerIds[peerId] = nil
+        self.heldBadgesPromise.set(Set(self.heldBadgePeerIds.keys))
+        for entry in self.entries where entry.peerId == peerId && entry.kind == .chatListBadge {
+            entry.provider(nil)?.hiddenView?.isHidden = false
+        }
+    }
+
     // The reminder fired while the app is open: an open chat shows its "Reminder at …" line right away.
     public func fire(peerId: EnginePeer.Id) {
         for entry in self.entries where entry.peerId == peerId {
